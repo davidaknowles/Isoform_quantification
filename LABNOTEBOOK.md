@@ -94,6 +94,24 @@ Long-read platforms agree. PB vs ONT gives $\psi$ Pearson 0.94 and gene TV 0.08 
 
 The truncation model slightly lowers cross-platform LR agreement (PB vs ONT $\psi$ Pearson 0.941 → 0.920). Agreement is not accuracy, since plain models on two platforms can share the same error (e.g. assigning truncated reads to short isoforms). Real-data accuracy needs spike-ins with known isoform molarities: SIRVs in the WTC11 PacBio libraries, and SIRV/sequins in SG-NEx.
 
+### 2026-10-28 WTC11 SIRV Set 4 ground truth
+
+The WTC11 LR libraries carry Lexogen SIRV Set 4: 69 SIRV isoforms in 7 genes (mix E0) and 15 single-isoform long SIRVs (4–12 kb), all at 0.6 fmol, plus ERCCs. The truth is therefore $\psi = 1/n$ within each SIRV gene and equal molar abundance across all 84. LR reads were remapped to GENCODE v38 plus the spike-in transcripts (built from Lexogen's sequences and correct annotation) and scored with `analyses/wtc11/sirv_eval.py` (means over the three biosamples):
+
+| fit | SIRV gene TV median | SD log abundance, 69 isoforms | long / isoform mean abundance |
+|---|---|---|---|
+| PB | 0.374 | 2.05 | 2.19 |
+| PB, AS ≥ 0.95 best | 0.415 | 2.38 | 2.19 |
+| PB + truncation | 0.319 | 1.56 | 2.19 |
+| CT | 0.217 | 1.86 | 0.033 |
+| CT, AS ≥ 0.95 best | 0.222 | 2.18 | 0.033 |
+| CT + truncation | 0.209 | 1.40 | 0.033 |
+| ONT dRNA | 0.131 | 1.22 | 0.22 |
+| ONT dRNA, AS ≥ 0.95 best | 0.206 | 1.73 | 0.22 |
+| ONT dRNA + truncation | 0.123 | 0.40 | 0.22 |
+
+On spike-ins with known molarity, best-score ties beat the 0.95 threshold on every platform, and the truncation model improves every platform (for ONT the spread of log abundances drops from 1.22 to 0.40). Long SIRVs are over-sampled 2× by PacBio poly(A), under-sampled 30× by CapTrap and 5× by ONT direct RNA, so length-dependent sampling is large and platform specific. A per-library length bias $b_t = \exp(x_t^\top w)$ (`LengthBias` in `joli/lr_bias.py`, piecewise-linear in $\log L_t$) is identifiable only when $\theta$ is shared with a library whose rates are fixed, e.g. poly(A) SR with effective lengths, or several LR protocols on one RNA sample. PacBio remains far from the truth even with truncation (TV 0.32), possibly from PCR and size selection in library prep.
+
 ## Requirements added 2026-10-27
 
 - Primer and coverage bias awareness. Parse (oligo-dT and random-hexamer RT in the same cell), Smart-seq2 (3' bias in degraded samples) and LR (5' truncation, length-dependent capture) all violate $c_{let}=1$, $b_{lt}=$ effective length. The bias model enters through $b_{lt}$ (expected reads per molecule, integrating a positional density over transcript coordinates) and $c_{let}$ (the share of that density falling in positions that produce EC $e$). This needs read positions, which kallisto's TCC output drops. Options are tealeaf's aligner (it already computes primer-specific read opportunities for Parse), salmon/alevin-fry selective alignment, or minimap2 for LR. Bias parameters (a few per library and primer, e.g. a positional density on relative coordinates) can be fitted by an outer M-step.
