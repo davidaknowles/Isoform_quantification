@@ -28,6 +28,39 @@ Re-scoring sim1 from the best inherited runs (SS = `exprmnt_2026_05_18__12_46_25
 
 Most MS "false positives" are expressed transcripts, and MS puts less total TPM on false positives than SS. Against the PB GT, MS is worse on GT-nonzero Spearman (0.814 vs 0.824) and Pearson (0.947 vs 0.967), so conclusions depend on which truth is used. Score against the generating truth from now on.
 
+Within-gene isoform fractions ($\psi_t = \mathrm{TPM}_t / \sum_{t' \in g(t)} \mathrm{TPM}_{t'}$, genes with ≥2 transcripts and true gene TPM ≥1, ~12.7k genes) also favour MS (`analyses/sim_rescore.py`, `joli/evaluate.py`): sim1 $\psi$ Pearson 0.891 → 0.905, median per-gene total-variation error 0.162 → 0.140, major-isoform accuracy 0.757 → 0.777. JK SS reproduces lr-kallisto exactly.
+
+### 2026-10-27 Packaging
+
+`JOLI_Kallisto/core` is now the package `joli/` (relative imports, `pyproject.toml`, installed editable into a uv venv with CPU torch). The student's scripts and tests import `joli.*`. Two tests already failed on the original code (`test_JolitoKallisto.py` looks for `main_joli.py` in `test/`; `test_main_multisample_joli.py` calls an old signature); one stale attribute in `test_em_algorithm.py` was fixed. New tests are in `tests/` (pytest).
+
+### 2026-10-27 Joint SR+LR likelihood (`joli/joint.py`)
+
+Units $k$ have molar abundances $\theta_k \in \Delta^{T-1}$. Library $l$ observes $\mu_l = \sum_k \pi_{lk}\theta_k$, with $\pi \in \mathbb{R}_+^{L\times K}$ the molecule fractions of each unit in each library (one-hot for a library from one sample). A read of library $l$ falls in EC $e$ with probability $P(e \mid l) = \sum_{t\in e} \mu_{lt} c_{let} / \sum_t \mu_{lt} b_{lt}$, where $b_{lt}$ is the sampling rate of transcript $t$ (effective length for SR, 1 for LR) and $c_{let}$ the relative compatibility weight (1 for now; bias models enter through $b$ and $c$). With $b$ the effective length and $c=1$ this is kallisto's SR likelihood in molar units. The $-N_l \log B_l$ normaliser, $B_l = \sum_t \mu_{lt} b_{lt}$, is minorised by its tangent, giving the MM update $\theta_{kt} = (Z_{kt} + a_{kt})/(D_{kt} + \lambda_k)$ with $Z_{kt}$ the expected reads of $(k,t)$ summed over libraries, $D_{kt} = \sum_l N_l \pi_{lk} b_{lt}/B_l$, Dirichlet pseudo-counts $a_{kt}$, and $\lambda_k$ normalising. For one LR library this is JoliEM's MAP update. Tests check agreement with JoliEM (LR) and kallisto's $\rho$ (SR), monotone likelihood, recovery of mixture components, and that joint beats either platform on synthetic data.
+
+Iterates use SQUAREM (scheme S3) with a fallback to the plain MM step when the extrapolated point has lower log posterior. On the 0.9M-read LR sample it reaches the plain-EM optimum (log-likelihood −8,018,894.43) in 372 MM steps (6 s) against ~2,000 plain steps. After convergence, transcripts with < 0.01 expected reads are zeroed and one more MM step is run (kallisto's finalRound): many MLEs sit on the simplex boundary, and without this the number of nonzero transcripts depends on the iteration count (73k at 500 plain steps, 66k at 2,000, 81k with SQUAREM). Spearman on the union of nonzero transcripts tracks this count (0.808 → 0.794 between 500 and 2,000 steps at near-identical likelihood), so it is a poor primary metric. Use log-Pearson, MARD and the $\psi$ metrics.
+
+lr-kallisto's long-read EM (single-transcript ECs left out of the EM loop and added afterwards) is not the MLE. On sim1 LR its log-likelihood is −8,039,332 against −8,018,894 for the MLE, with lower log-Pearson to the generating truth (0.921 vs 0.925).
+
+Simulation, SR+LR per sample against the generating truth (`analyses/sim_joint.py`, 9.5M SR pairs and 0.9M LR reads per sample, no cross-sample prior):
+
+| sample | fit | log-Pearson | MARD | FN | FP | $\psi$ Pearson | gene TV median | major-isoform acc |
+|---|---|---|---|---|---|---|---|---|
+| sim1 | LR | 0.925 | 0.674 | 88,456 | 2,196 | 0.895 | 0.141 | 0.772 |
+| sim1 | SR | 0.893 | 0.662 | 74,387 | 5,031 | 0.830 | 0.200 | 0.687 |
+| sim1 | SR+LR | 0.933 | 0.608 | 71,442 | 4,156 | 0.899 | 0.125 | 0.780 |
+| sim2 | LR | 0.921 | 0.642 | 83,525 | 2,214 | 0.893 | 0.143 | 0.765 |
+| sim2 | SR | 0.885 | 0.642 | 71,635 | 4,802 | 0.828 | 0.209 | 0.678 |
+| sim2 | SR+LR | 0.929 | 0.581 | 68,109 | 4,028 | 0.897 | 0.127 | 0.770 |
+
+SR+LR improves on both platforms on every metric except FP count (between the two). SR alone is worse than LR for isoform fractions despite 10× the reads. Fits take 5 s (LR), 60–100 s (SR) and 11–23 s (SR+LR, LR resolves the ambiguity SR converges slowly on) in numpy.
+
+## Requirements added 2026-10-27
+
+- Primer and coverage bias awareness. Parse (oligo-dT and random-hexamer RT in the same cell), Smart-seq2 (3' bias in degraded samples) and LR (5' truncation, length-dependent capture) all violate $c_{let}=1$, $b_{lt}=$ effective length. The bias model enters through $b_{lt}$ (expected reads per molecule, integrating a positional density over transcript coordinates) and $c_{let}$ (the share of that density falling in positions that produce EC $e$). This needs read positions, which kallisto's TCC output drops. Options are tealeaf's aligner (it already computes primer-specific read opportunities for Parse), salmon/alevin-fry selective alignment, or minimap2 for LR. Bias parameters (a few per library and primer, e.g. a positional density on relative coordinates) can be fitted by an outer M-step.
+- Atlas efficiency. Thousands of libraries × ~200k transcripts. The E-step is a sparse gather/scatter over (EC, transcript) positions and parallelises over libraries. Plan is a Rust kernel with a C ABI called through ctypes (the pattern of `tealeaf/rust/native_align`), with numpy kept as the reference implementation, plus SQUAREM.
+- Cell-type composition for the atlas. Bulk tissue LR libraries are mixtures over cell types ($\pi_{lk}$ above). $\pi_{lk}$ should be estimated, not fixed: initialise from single-cell references (deconvolution on gene-level counts) and update within the EM. The M-step for $\pi_l$ has the same MM form, with a Dirichlet prior centred on the reference-based estimate. Composition is in molecule units, so it has to account for cell-type differences in mRNA content.
+
 ## Next steps (brainstorm, 2026-10-27)
 
 Goal: joint SR+LR isoform quantification across many samples, such as single-cell metacells or fine cell states, where SR and LR libraries need not be paired one-to-one.
