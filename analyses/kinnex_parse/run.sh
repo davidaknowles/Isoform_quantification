@@ -29,4 +29,14 @@ case $1 in
     k=$(printf %03d ${SLURM_ARRAY_TASK_ID})
     $MM -c -x map-hifi -N 100 -t $T $REF/spliceu.hifi.mmi $OUT/reads/cdna_$k.fa.gz 2> $OUT/minimap2/cdna_$k.log \
       | gzip -1 > $OUT/minimap2/cdna_$k.paf.gz ;;
+  molecules)
+    k=$(printf %03d ${SLURM_ARRAY_TASK_ID})
+    ~/venv/joli/bin/python $REPO/analyses/kinnex_parse/molecules.py $OUT $REF chunk $k ;;
+  combine)
+    ~/venv/joli/bin/python $REPO/analyses/kinnex_parse/molecules.py $OUT $REF combine
+    module load python/3.12.3-GCCcore-13.3.0
+    ~/venv/celltypist/bin/python $REPO/analyses/kinnex_parse/celltypist_labels.py $OUT/molecules $OUT/celltypist.tsv ;;
 esac
+# Downstream (after align and call_cells.py):
+#   sbatch --array=0-<n_chunks-1> analyses/kinnex_parse/run.sh molecules
+#   sbatch analyses/kinnex_parse/run.sh combine

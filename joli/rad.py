@@ -117,3 +117,20 @@ def libraries_from_molecules(aln, cell_group, transcript_names, rates, model=Non
         out[g] = library_from_alignments(str(g), a, transcript_names, features=feat,
                                          platform=platform, b=rates[g])
     return out
+
+
+_CODE = np.full(256, 255, dtype=np.uint8)
+for _i, _b in enumerate(b"ACGT"):
+    _CODE[_b] = _i
+
+
+def encode_2bit(seqs, length):
+    """Strings of ACGT (fixed length <= 32) to 2-bit packed uint64, first base highest; -1 if any other base."""
+    a = np.asarray(seqs, dtype=f"S{length}").view(np.uint8).reshape(-1, length)
+    c = _CODE[a]
+    bad = (c == 255).any(axis=1)
+    out = np.zeros(len(a), dtype=np.uint64)
+    for j in range(length):
+        out = (out << np.uint64(2)) | (c[:, j] & 3).astype(np.uint64)
+    out[bad] = np.iinfo(np.uint64).max
+    return out

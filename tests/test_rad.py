@@ -53,3 +53,17 @@ def test_position_model_resolves_alternative_polya():
     assert err1 < 0.5 * err0, (err0, err1)
     # learned profile puts most mass within 500 nt of the 3' end
     assert model.prof.p[model.prof.edges[:-1] < 500].sum() > 0.7
+
+
+def test_encode_roundtrip():
+    from joli.rad import encode_2bit
+    s = ["ACGTACGTACGTACGTACGTACGT", "TTTTGGGGCCCCAAAAACGTACGT"]
+    assert decode_2bit(encode_2bit(s, 24), 24) == s
+
+
+def test_knee_threshold():
+    from joli.cells import knee_threshold
+    rng = np.random.default_rng(0)
+    counts = np.r_[rng.lognormal(np.log(3000), 0.5, 2000), rng.lognormal(np.log(30), 0.7, 50000)]
+    t = knee_threshold(counts)
+    assert 150 < t < 1500
