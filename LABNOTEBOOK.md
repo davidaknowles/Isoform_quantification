@@ -35,9 +35,43 @@ Goal: joint SR+LR isoform quantification across many samples, such as single-cel
 1. Reproduce and re-evaluate. Run the JK SS/MS pipeline end to end in a fresh env. Make the generating truth the default in `run_gt_comparison.py`. Add a per-gene isoform-fraction (DTU-style) metric, since multi-sample sharing should mostly help within-gene proportions.
 2. Joint SR+LR likelihood. Keep one molar abundance $\theta_s$ per biological unit. Platform $p \in \{\mathrm{SR},\mathrm{LR}\}$ observes EC $e$ with probability $\propto \sum_t \theta_{st}\, b_{pt}\, c^{p}_{et}$, where $c^p_{et}$ is the platform's EC compatibility/likelihood and $b_{pt}$ is a platform sampling weight (effective length for SR, a learned length/truncation bias for LR). The E-steps stay per platform and the M-step pools expected molecule counts. MPAQT and miniQuant do this for bulk single samples. Our contribution is the multi-sample part.
 3. Proper empirical Bayes for the prior. Replace plug-in Dirichlet ML with VI/CAVI ($q(\theta_s)$ Dirichlet, $\alpha$ updated from $E_q[\log\theta_s]$ by Minka fixed point or Adam on the ELBO). This should remove the single-tx flags and the $\alpha$ explosions, and it gives posterior uncertainty.
-4. Structured prior. Factor $\theta_{st} = g_{s,\gamma(t)}\, \phi_{st}$, where $g_{s\gamma}$ is the expression of gene $\gamma$ and $\phi_{s}$ holds within-gene isoform fractions. Use $\phi_{s,\gamma} \sim \mathrm{Dir}(\kappa_\gamma m_\gamma)$, with mean usage $m_\gamma$ and a gene-level precision $\kappa_\gamma$ that is shrunk across genes. Gene levels then vary freely across cell states while isoform usage is shared.
-5. Flexible matching. Introduce latent units $k$ (cell states, metacells) with $\theta_k$. Each library $l$ (SR or LR, a cell, metacell or pseudobulk) is a mixture $\sum_k \pi_{lk}\theta_k$ with $\pi_{lk}$ known (same cells, shared barcodes), soft (cell-type composition) or estimated. Tie fine states to coarse ones with a tree prior, $\phi_k \sim \mathrm{Dir}(\kappa\, \phi_{\mathrm{parent}(k)})$, so fine states with only SR borrow LR information from coarser ancestors. A continuous version would regress logit isoform usage on a cell embedding.
-6. Single-cell specifics. Account for UMIs and for SR chemistry: 10x 3' reads carry mostly polyA-site information, while 5' kits and Smart-seq3 carry more. Use lr-kallisto/bustools barcode handling. Batch the EM on GPU (torch sparse) across thousands of libraries.
+4. Structured prior (gene expression × within-gene fractions). Not pursued for now (decision 2026-10-27): stay with pure transcript-level quantification.
+5. Flexible matching. Introduce latent units $k$ (cell states, metacells) with $\theta_k$. Each library $l$ (SR or LR, a cell, metacell or pseudobulk) is a mixture $\sum_k \pi_{lk}\theta_k$ with $\pi_{lk}$ known (same cells, shared barcodes), soft (cell-type composition) or estimated. Two ways to share across units:
+   - Tree prior, $\theta_k \sim \mathrm{Dir}(\kappa\, \theta_{\mathrm{parent}(k)})$, so fine states with only SR borrow LR information from coarser ancestors.
+   - Design matrix, $\theta_l = \mathrm{softmax}(\eta_l)$ with $\eta_l = B^\top x_l + \epsilon_l$, where $x_l \in \mathbb{R}^D$ codes the covariates of library $l$ (donor, tissue, cell type, condition, platform), $B \in \mathbb{R}^{D\times T}$ is shrunk (ridge or random effects), and $\epsilon_l \in \mathbb{R}^T$ is library-level noise. A tree is the special case where $x_l$ indicates the ancestors of $l$. This also allows crossed factors, e.g. SR from donors A,B and LR from donor C sharing a cell-type effect.
+6. Single-cell specifics. Account for UMIs. 10x SR (3' or 5') is used only for barcodes, cell labels and expression, never for isoforms. Isoform-informative SR comes from full-length plate methods (Smart-seq2/3) or Parse/Split-seq (random-hexamer RT). Use lr-kallisto/bustools barcode handling. Batch the EM on GPU (torch sparse) across thousands of libraries.
 7. Simulation. Extend `Simulations/` to generate cell states with planted DTU, and SR/LR designs with mismatched resolution (e.g. SR per fine state, LR per coarse type).
 8. Baselines. lr-kallisto, oarfish, IsoQuant, Bambu/Bambu-Clump, MPAQT, miniQuant, Isosceles (single-cell pseudobulk).
-9. Housekeeping. Export the conda env as a spec file, turn `JOLI_Kallisto/core` into an importable package (replacing the `sys.path` inserts), and retire `AT_code` once JK covers VI.
+9. Housekeeping. Move to a uv-managed venv, turn `JOLI_Kallisto/core` into an importable package (replacing the `sys.path` inserts), and retire `AT_code` once JK covers VI. The target is a new paper, not a revision of the 2025 JOLI preprint.
+
+## Data survey (2026-10-27)
+
+Matching types: exact (same library cDNA or same cells), same biosample, same donor, or only same cell type/tissue (different donors).
+
+### On the cluster
+
+| Dataset | SR | LR | Matching | Notes |
+|---|---|---|---|---|
+| LRGASP-style WTC11/H1 (student's ENCODE 2026 download, ~52 GB) | Illumina, 9 experiments | PacBio/ONT cDNA, dRNA, 6 experiments | same cell line, replicates | bulk, best for method development; also the older WTC-11 PacBio+Illumina and H1 Illumina/ONT/PacBio alignments |
+| ENCODE4 PacBio human (Megan, `encode_pacbio`) | not downloaded | 138 libraries, 95 experiments, 51 tissue, 61 cell line, 22 in vitro differentiated | ENCODE often has SR on the same biosample (to check via the ENCODE API) | DLPFC ×9, heart chambers, lung, colon, adrenal, ovary, HL-60 ×8 |
+| ENCODE4 PacBio mouse (Megan, `2025_mouse_longread`) | to check | yes | to check | mouse tissues |
+| ENCODE4 K562/HepG2 LR (Julia, `ENCODE4_LRS_LRP2_demo_data`) | – | yes, aligned | – | with mass spec |
+| PacBio Kinnex PBMC (`sc/pacbio_kinnex_pbmc`, 1.4 TB) | 10x barcodes only | 7 × 10x 3'/5' (Revio, Vega) + 1 × Parse WT | same cells LR↔barcodes; donors differ from the Parse SR sets | the Parse Kinnex library has the same chemistry as Parse SR |
+| Parse PBMC whole cells (tealeaf: GSE327907, GSE334840, GSE320507, GSE285843, GSE246624, GSE295527) | Parse WT, isoform-informative | – | cell type only (to Kinnex) | 2–46 donors per series, stimulation and long-COVID designs |
+| Parse brain nuclei (tealeaf: GSE233208 human, GSE189033 mouse) | Parse WT | – | – | nuclei, so intronic/precursor dominated |
+| Tabula Muris (`data/archive/tabula_muris/smart_seq`, ~7.4k files) | Smart-seq2 FACS | – | tissue/cell type to mouse LR | Tabula Muris Senis has metadata only on disk; reads on AWS |
+| Tabula Sapiens | Smart-seq2 (`TabulaSapiens_ss2only.h5ad`, Leaflet/SpliZ outputs; raw BAMs on AWS) | – | tissue/cell type to ENCODE4 human tissue LR | the lab's IsoformGazer uses TS v2 SS2 |
+| NIMH_LRS (Megan, 9.7 TB) | ? | PacBio HiFi, ~99 samples | ? | tissue and matching SR unknown, ask Megan |
+| GTEx ONT (`ont_gtex`) | GTEx Illumina (dbGaP) | junction BEDs only on disk | same sample | full data: Glinos et al. 2022, 88 samples, 15 tissues |
+
+### Public, not yet downloaded
+
+- SG-NEx (Chen et al. 2025 Nat Methods, AWS open data): 7+ cell lines, Illumina + ONT dRNA/cDNA/PCR-cDNA + PacBio, replicates, spike-ins. Best bulk multi-platform benchmark with known spike-in truth.
+- LR-Split-seq (Rebboah et al. 2021 Genome Biol): Split-seq SR and LR on the same cells (C2C12). The Mortazavi lab IGVF mouse founder-strain data may extend this to tissues (to check).
+- 10x + LR same-cell sets (ScISOr-Seq/SnISOr-Seq brain, scNanoGPS, SiCeLoRe, FLT-seq, MAS-seq): useful only as LR-per-cell with barcodes.
+
+### Candidate study designs
+
+1. Bulk development: WTC11/H1 SR+LR replicates, SG-NEx with spike-ins.
+2. Single cell, unmatched donors: Parse PBMC SR (many donors, conditions) with Kinnex PBMC LR (different donors). Matching by cell type through the design matrix. The Parse Kinnex library is a same-chemistry anchor.
+3. Atlas: Tabula Sapiens SS2 (cell types × tissues) with ENCODE4 human tissue PacBio (bulk, same tissues, different donors), and Tabula Muris SS2 with ENCODE4 mouse LR. Bulk LR libraries enter as mixtures over cell types with composition $\pi_{lk}$ estimated from SS2/10x references.
