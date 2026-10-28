@@ -44,9 +44,8 @@ from datetime import datetime
 from pathlib import Path
 
 # Add core/ to path for library module imports
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "core"))
 
-from load_tcc import load_tcc_data  # Step 1.1 — data loader
+from joli.load_tcc import load_tcc_data  # Step 1.1 — data loader
 
 # ============================================================
 # CONFIG — edit everything here; do not touch pipeline logic below

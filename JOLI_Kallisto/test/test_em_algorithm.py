@@ -27,11 +27,10 @@ import sys
 import numpy as np
 
 # Add JOLI_Kallisto directory to path for module imports
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "core"))
 
-from load_tcc import load_tcc_data
-from weights import compute_weights
-from em_algorithm import JoliEM, EMResult
+from joli.load_tcc import load_tcc_data
+from joli.weights import compute_weights
+from joli.em_algorithm import JoliEM, EMResult
 from test_helpers import make_sample_dir, check
 
 
@@ -161,8 +160,8 @@ def test_uniform_prior_matches_plain_em():
                               alpha_prior=np.ones(3, dtype=np.float64))
 
         # Normalize to compare proportions
-        plain_norm = result_plain.alpha / result_plain.alpha.sum()
-        map_norm   = result_map.alpha   / result_map.alpha.sum()
+        plain_norm = result_plain.theta_unnorm / result_plain.theta_unnorm.sum()
+        map_norm   = result_map.theta_unnorm   / result_map.theta_unnorm.sum()
 
         corr = float(np.corrcoef(plain_norm, map_norm)[0, 1])
         passed &= check(corr > 0.9999,
@@ -211,8 +210,8 @@ def test_strong_prior_pulls_theta():
         alpha_prior  = np.array([1.0, 1.0, 1000.0], dtype=np.float64)
         result_map   = em.run(convergence_mode="joli", alpha_prior=alpha_prior)
 
-        plain_tx2 = result_plain.alpha[2] / result_plain.alpha.sum()
-        map_tx2   = result_map.alpha[2]   / result_map.alpha.sum()
+        plain_tx2 = result_plain.theta_unnorm[2] / result_plain.theta_unnorm.sum()
+        map_tx2   = result_map.theta_unnorm[2]   / result_map.theta_unnorm.sum()
 
         passed &= check(map_tx2 > plain_tx2,
                         "Strong prior on tx2: MAP tx2 fraction > plain EM tx2 fraction",
@@ -262,7 +261,7 @@ def test_init_theta_warm_start():
                               init_theta=np.zeros(3, dtype=np.float64))
         passed &= check(isinstance(result_zeros, EMResult),
                         "init_theta=zeros falls back gracefully, returns EMResult")
-        passed &= check(result_zeros.alpha.sum() > 0,
+        passed &= check(result_zeros.theta_unnorm.sum() > 0,
                         "init_theta=zeros: alpha sum > 0 after fallback")
     finally:
         shutil.rmtree(tmpdir)

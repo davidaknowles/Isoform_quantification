@@ -24,9 +24,8 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "core"))
 
-from dirichlet_optimizer import DirichletOptimizer
+from joli.dirichlet_optimizer import DirichletOptimizer
 from test_helpers import check
 
 

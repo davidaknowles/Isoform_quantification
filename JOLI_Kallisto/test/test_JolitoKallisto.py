@@ -34,11 +34,10 @@ import tempfile
 import numpy as np
 
 # Add core/ to path for library module imports
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "core"))
-from load_tcc import load_tcc_data, TCCData
-from weights import compute_weights, WeightData
-from em_algorithm import JoliEM, EMResult
-from output_writer import write_abundance
+from joli.load_tcc import load_tcc_data, TCCData
+from joli.weights import compute_weights, WeightData
+from joli.em_algorithm import JoliEM, EMResult
+from joli.output_writer import write_abundance
 
 
 # ============================================================

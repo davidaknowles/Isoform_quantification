@@ -70,9 +70,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "core"))
 
-from multi_sample_em import MultiSampleJoliEM
+from joli.multi_sample_em import MultiSampleJoliEM
 
 
 # ============================================================

@@ -39,8 +39,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # Allow standalone execution: add core/ to path for TrainingTracker import
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "core"))
-from training_tracker import TrainingTracker
+from joli.training_tracker import TrainingTracker
 
 
 # ============================================================

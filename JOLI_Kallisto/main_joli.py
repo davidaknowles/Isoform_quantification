@@ -55,13 +55,12 @@ import sys
 import time
 
 # Add core/ to path for library module imports
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "core"))
 
-from load_tcc import load_tcc_data, load_flens
-from weights import (compute_weights, load_fld_histogram,
+from joli.load_tcc import load_tcc_data, load_flens
+from joli.weights import (compute_weights, load_fld_histogram,
                      load_fasta_transcript_lengths)
-from em_algorithm import JoliEM
-from output_writer import write_abundance
+from joli.em_algorithm import JoliEM
+from joli.output_writer import write_abundance
 
 
 # ============================================================

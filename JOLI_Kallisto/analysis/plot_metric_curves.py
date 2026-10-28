@@ -57,8 +57,7 @@ import numpy as np
 import pandas as pd
 
 # Load core/ modules (no __init__.py needed)
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "core"))
-from load_tcc import load_tcc_data  # noqa: E402
+from joli.load_tcc import load_tcc_data  # noqa: E402
 
 # ============================================================
 # CONFIG — edit here; do not edit below

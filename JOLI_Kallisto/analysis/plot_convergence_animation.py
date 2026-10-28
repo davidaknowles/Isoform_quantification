@@ -707,10 +707,7 @@ def main() -> None:
     print("\n[5] JK MS inter-sample Spearman curve")
     stats_path = os.path.join(jk_ms_dir, "training_stats.pkl")
     if os.path.exists(stats_path):
-        import sys as _sys
-        _sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                          "..", "core"))
-        from training_tracker import TrainingTracker
+        from joli.training_tracker import TrainingTracker
         tracker = TrainingTracker.load(stats_path)
 
         pair_key = (SAMPLE_NAMES[0], SAMPLE_NAMES[1])

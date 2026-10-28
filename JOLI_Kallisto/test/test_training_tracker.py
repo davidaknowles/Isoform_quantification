@@ -27,9 +27,8 @@ import tempfile
 
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "core"))
 
-from training_tracker import TrainingTracker
+from joli.training_tracker import TrainingTracker
 from test_helpers import check
 
 

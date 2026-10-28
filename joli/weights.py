@@ -50,7 +50,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from load_tcc import TCCData
+from .load_tcc import TCCData
 
 
 # ============================================================

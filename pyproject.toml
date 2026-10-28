@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "joli"
+version = "0.1.0"
+description = "Joint short- and long-read isoform quantification across samples"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "scipy",
+    "pandas",
+    "torch",
+]
+
+[project.optional-dependencies]
+plot = ["matplotlib", "plotnine"]
+dev = ["pytest"]
+
+[tool.setuptools]
+packages = ["joli"]

@@ -50,13 +50,13 @@ import pickle
 
 import numpy as np
 
-from load_tcc import load_tcc_data, load_flens, TCCData
-from weights import (compute_weights, WeightData,
+from .load_tcc import load_tcc_data, load_flens, TCCData
+from .weights import (compute_weights, WeightData,
                      load_fld_histogram, load_fasta_transcript_lengths)
-from em_algorithm import JoliEM, EMResult
-from output_writer import write_abundance
-from dirichlet_optimizer import DirichletOptimizer
-from training_tracker import TrainingTracker
+from .em_algorithm import JoliEM, EMResult
+from .output_writer import write_abundance
+from .dirichlet_optimizer import DirichletOptimizer
+from .training_tracker import TrainingTracker
 
 
 class MultiSampleJoliEM:
@@ -620,7 +620,7 @@ class MultiSampleJoliEM:
             try:
                 import sys
                 sys.path.insert(0, os.path.join(
-                    os.path.dirname(os.path.abspath(__file__)), "..", "analysis"
+                    os.path.dirname(os.path.abspath(__file__)), "..", "JOLI_Kallisto", "analysis"
                 ))
                 from plot_training import generate_all_plots
                 figures_dir = os.path.join(output_dir, "figures")
