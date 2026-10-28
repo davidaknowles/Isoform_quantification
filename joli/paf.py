@@ -5,8 +5,10 @@ Long-read equivalence classes from minimap2 transcriptome alignments (PAF).
 
 Reads are aligned to transcript sequences with secondary alignments kept
 (``minimap2 -c -x map-hifi -N 100``). For each read the alignments whose
-score is within ``score_frac`` of the read's best are retained, as in
-oarfish and lr-kallisto. Unlike kallisto's TCC output, the alignment table
+score is at least ``score_frac`` times the read's best are retained. The
+default keeps only best-score ties: on the LRGASP-style simulation a 0.95
+threshold (oarfish's default) admits isoforms that differ by whole exons
+and is far less accurate (LR-only log-Pearson 0.74 vs 0.96). Unlike kallisto's TCC output, the alignment table
 keeps where on each transcript the read lands, which a truncation or
 coverage model needs.
 
@@ -48,10 +50,10 @@ def read_paf(path, chunksize=2_000_000):
     return df
 
 
-def filter_alignments(aln, score_frac=0.95, strand=None, min_read_frac=0.0):
+def filter_alignments(aln, score_frac=1.0, strand=None, min_read_frac=0.0):
     """
     Keep, per read, alignments with AS >= score_frac * best AS, one per
-    (read, transcript) pair (highest AS).
+    (read, transcript) pair (highest AS). Adds column AS_gap = best AS - AS.
 
     Args:
         strand        : "+" | "-" | None -- required alignment strand (e.g. "+" for direct RNA).
@@ -65,7 +67,19 @@ def filter_alignments(aln, score_frac=0.95, strand=None, min_read_frac=0.0):
     a = a.sort_values(["read", "tx", "AS"], ascending=[True, True, False])
     a = a.drop_duplicates(["read", "tx"], keep="first")
     best = a.groupby("read", observed=True)["AS"].transform("max")
-    return a[a["AS"] >= score_frac * best].reset_index(drop=True)
+    a = a[a["AS"] >= score_frac * best].copy()
+    a["AS_gap"] = (best[a.index] - a["AS"]).to_numpy()
+    return a.reset_index(drop=True)
+
+
+def score_weight(aln, beta=1.0):
+    """
+    Per-alignment weight exp(-beta * (best AS of the read - AS)), salmon's
+    --scoreExp form. As rich-EC weights these are averaged over reads with the
+    same transcript set, which mixes tied reads with reads that have large gaps
+    and loses most of the information (worse than strict filtering in simulation).
+    """
+    return np.exp(-beta * aln["AS_gap"].to_numpy(dtype=np.float64))
 
 
 def library_from_alignments(name, aln, transcript_names, weight=None, features=None,

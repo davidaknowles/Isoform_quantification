@@ -93,3 +93,31 @@ def fraction_metrics(est: pd.Series, truth: pd.Series, t2g: pd.Series, min_gene_
         "gene_tv_median": float(abs_err.median()),
         "major_isoform_acc": float((major_t == major_e.reindex(major_t.index)).mean()),
     }
+
+
+def concordance_metrics(a: pd.Series, b: pd.Series, t2g: pd.Series, min_gene_tpm: float = 5.0) -> dict:
+    """
+    Symmetric agreement of two estimates without a ground truth (e.g. two
+    platforms or two replicates). Transcript level, log1p TPM Pearson over
+    transcripts nonzero in either. Isoform level, genes with >= 2 annotated
+    transcripts and gene TPM >= min_gene_tpm in both.
+    """
+    idx = t2g.index
+    a, b = a.reindex(idx).fillna(0.0), b.reindex(idx).fillna(0.0)
+    u = ((a > 0) | (b > 0)).to_numpy()
+    fa, fb = isoform_fractions(a, t2g), isoform_fractions(b, t2g)
+    n_tx = fa.groupby("gene")["tpm"].transform("size")
+    keep = (n_tx >= 2) & (fa["gene_tpm"] >= min_gene_tpm) & (fb["gene_tpm"] >= min_gene_tpm)
+    pa, pb = fa.loc[keep, "psi"].to_numpy(), fb.loc[keep, "psi"].to_numpy()
+    genes = fa.loc[keep, "gene"].to_numpy()
+    tv = pd.Series(np.abs(pa - pb)).groupby(genes).sum() / 2.0
+    major_a = pd.Series(pa, index=fa.index[keep]).groupby(genes).idxmax()
+    major_b = pd.Series(pb, index=fa.index[keep]).groupby(genes).idxmax()
+    return {
+        "pearson_log1p": float(pearsonr(np.log1p(a.to_numpy()[u]), np.log1p(b.to_numpy()[u]))[0]),
+        "n_genes": int(len(tv)),
+        "psi_pearson": float(pearsonr(pa, pb)[0]),
+        "gene_tv_median": float(tv.median()),
+        "gene_tv_mean": float(tv.mean()),
+        "major_isoform_agree": float((major_a == major_b.reindex(major_a.index)).mean()),
+    }

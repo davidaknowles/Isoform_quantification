@@ -1,6 +1,7 @@
 """
-Long-read input from minimap2 transcriptome alignments (with and without the
-read-end truncation model) versus lr-kallisto TCCs on the simulation, in
+Long-read input from minimap2 transcriptome alignments (best-score ties, with
+and without the read-end truncation model; and the 0.95 score threshold)
+versus lr-kallisto TCCs on the simulation, in
 LR-only and SR+LR (salmon SR, no bias correction) fits.
 
 minimap2 was run as
@@ -49,12 +50,14 @@ def main(paf_dir, salmon_root, out_path=None, samples=None):
         sr = library_from_salmon("sr", Path(salmon_root) / f"{sample}_nobias", transcript_names=names)
 
         t0 = time.time()
-        aln = filter_alignments(read_paf(Path(paf_dir) / f"{sample}_long.paf.gz"))
+        raw = read_paf(Path(paf_dir) / f"{sample}_long.paf.gz")
+        aln = filter_alignments(raw)
         print(f"{sample}: {aln['read'].nunique()} reads, {len(aln)} alignments ({time.time() - t0:.0f} s)", flush=True)
         model = TruncationModel(tx_len)
         feat = model.features(aln["tstart"], aln["tend"], aln["tlen"])
         lrs = {
             "lr-kallisto TCC": library_from_tcc("lr", lr_tcc, "long"),
+            "minimap2 (AS >= 0.95 best)": library_from_alignments("lr", filter_alignments(raw, score_frac=0.95), names),
             "minimap2": library_from_alignments("lr", aln, names),
             "minimap2+trunc": library_from_alignments("lr", aln, names, features=feat),
         }

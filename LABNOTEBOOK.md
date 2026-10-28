@@ -55,6 +55,45 @@ Simulation, SR+LR per sample against the generating truth (`analyses/sim_joint.p
 
 SR+LR improves on both platforms on every metric except FP count (between the two). SR alone is worse than LR for isoform fractions despite 10× the reads. Fits take 5 s (LR), 60–100 s (SR) and 11–23 s (SR+LR, LR resolves the ambiguity SR converges slowly on) in numpy.
 
+### 2026-10-28 Read-level inputs: salmon for SR, minimap2 for LR
+
+Bias models need per-read positions, which kallisto's TCCs drop. Two loaders now produce JointEM libraries from aligners:
+
+- `joli/salmon_io.py` reads salmon's rich equivalence classes (`salmon quant --dumpEq --dumpEqWeights`) and its effective lengths (which absorb `--seqBias/--gcBias/--posBias`). The dumped weights are salmon's combined weights $v_{et} \propto w_{et}/l_t$ (auxiliary weight over effective length), normalised within the class. With $b_t = l_t$ and $c_{et} = v_{et} l_t$, salmon's own estimate is a fixed point of JointEM (expected reads agree to 80 of 9.8M); with $c_{et}=v_{et}$ the estimates disagree badly.
+- `joli/paf.py` reads minimap2 transcriptome alignments (`-c -N 100`), keeps per read the alignments within a score threshold of the best, and collapses reads into ECs, optionally keyed by integer per-alignment features (exact for any bias model that depends on those features only).
+
+The score threshold matters a lot. On the simulation the 0.95-of-best threshold (oarfish's default) admits isoforms differing by whole exons (median score gap among admitted non-best alignments 122) and gives LR-only log-Pearson 0.74. Keeping only best-score ties gives 0.96, well above lr-kallisto's TCCs (0.925). Soft weights $\exp(-\beta\,\Delta\mathrm{AS})$ collapsed into rich ECs do not recover this (0.83 even at $\beta=4$): averaging within a transcript set mixes tied reads with reads that have large gaps, the problem salmon's range factorisation addresses.
+
+### 2026-10-28 Long-read truncation model (`joli/lr_bias.py`)
+
+A read aligned to transcript $t$ of length $L_t$ at $[s,e)$ leaves $d_5 = s$ and $d_3 = L_t - e$ uncovered bases. $P(d_5, d_3 \mid t) = q_5(d_5 \mid L_t)\, q_3(d_3 \mid L_t)$ with $q(d\mid L) = (p_j/w_j)/F(L)$ for $d$ in bin $j$ of width $w_j$, $p \in \Delta^{J-1}$ over $J=19$ log-spaced bins, and $F(L) = \sum_j p_j o_j(L)$ the probability mass that fits in a transcript of length $L$ ($o_j(L)$ the fraction of bin $j$ below $L+1$). Weights enter JointEM as $c_{et} = q_5 q_3$. Given expected reads per alignment, the M-step maximises $\sum_j A_j \log p_j - \sum_t Z_t \log F_t(p)$ ($A_j$ expected reads in bin $j$, $Z_t$ expected reads of $t$), solved by the fixed point $p_j \propto A_j / \sum_t Z_t o_{tj}/F_t$ restricted to bins reachable by some expressed transcript. Outer iterations alternate this with warm-started JointEM runs. The model distinguishes a short isoform from the 3' end of a long one, which plain LR EM cannot. On a toy simulation of nested isoforms it cuts the L1 error from 1.03 to 0.08.
+
+Simulation, LR input (`analyses/sim_lr_paf.py`, sim1; sim2 within 0.01):
+
+| LR input | fit | log-Pearson | MARD | $\psi$ Pearson | gene TV median | major-isoform acc |
+|---|---|---|---|---|---|---|
+| lr-kallisto TCC | LR | 0.925 | 0.674 | 0.895 | 0.141 | 0.772 |
+| minimap2, AS ≥ 0.95 best | LR | 0.740 | 0.752 | 0.721 | 0.327 | 0.567 |
+| minimap2, best ties | LR | 0.961 | 0.582 | 0.935 | 0.053 | 0.865 |
+| minimap2, best ties + truncation | LR | 0.968 | 0.573 | 0.942 | 0.041 | 0.872 |
+| lr-kallisto TCC | SR+LR | 0.934 | 0.605 | 0.900 | 0.123 | 0.781 |
+| minimap2, best ties | SR+LR | 0.955 | 0.547 | 0.922 | 0.082 | 0.819 |
+| minimap2, best ties + truncation | SR+LR | 0.961 | 0.541 | 0.927 | 0.075 | 0.824 |
+
+The learned profiles are 3'-anchored (87% of reads within 1 base of the 3' end) with 37% full length at the 5' end and the rest spread over 3–100 bases.
+
+With the better LR input, adding SR now makes $\psi$ worse (gene TV 0.053 → 0.082), in every LR-depth stratum including genes with > 1,000 LR reads (0.001 → 0.004), so the SR contribution is biased rather than noisy. The SR generation itself matches the model: true SR read counts per transcript (recovered from RSEM read names) match truth × effective length within Poisson noise, start positions are uniform, and SR alone has the expected log-likelihood gap between MLE and truth (52k for ~81k nonzero transcripts). Gene-level SR and LR sampling rates agree with the truth within 3% across length deciles, and changing $b$ for the 100-nt poly(A) tail that the simulator's RSEM reference appends had no effect. The remaining suspect is read-to-EC assignment (true transcript missing from the EC), not yet tested. The sim's LR reads may also be cleaner than real ones (best-tie assignment is nearly an oracle).
+
+Short-read input (`analyses/sim_salmon.py`): salmon selective alignment is slightly better than kallisto (SR-only log-Pearson 0.898 vs 0.893, $\psi$ 0.835 vs 0.830; salmon's own quant.sf 0.901). Rich weights make no difference here. Salmon's bias correction slightly hurts (0.889), as expected for data simulated without bias.
+
+### 2026-10-28 WTC11, four platforms on three biosamples
+
+ENCSR450EXF (Illumina SE100), ENCSR507JOF (PacBio poly(A)), ENCSR309IKK (PacBio CapTrap) and ENCSR392BGY (ONT direct RNA) share biosamples ENCBS944CBA, ENCBS593PKA and ENCBS474NOC. Reference GENCODE v38. SR with salmon (genome decoys), LR with minimap2 (`analyses/wtc11/align.sh`, `quant.py`, `compare.py`).
+
+Long-read platforms agree. PB vs ONT gives $\psi$ Pearson 0.94 and gene TV 0.08 (genes with ≥ 2 isoforms, ≥ 5 TPM in both). SR agrees with none of them ($\psi$ Pearson ≈ 0.59, gene TV ≈ 0.58) but is reproducible across biosamples ($\psi$ Pearson 0.97). The SR libraries are total RNA-seq (rRNA-depleted). 55–60% of reads map to transcripts rather than genome decoys, and 73% of SR TPM goes to misc_RNA (7SK/7SL), snRNA, ribozymes and snoRNAs, against 0% in PB. Retained-intron transcripts are 10% of the protein-coding plus retained-intron TPM in SR, against 2% in PB. Every WTC11 and H1 SR experiment in the student's ENCODE set is total RNA (the others are 32-nt PE), so WTC11 has no poly(A) SR partner for its LR. salmon's sequence and positional bias correction lowers SR–LR agreement further ($\psi$ Pearson 0.44).
+
+The truncation model slightly lowers cross-platform LR agreement (PB vs ONT $\psi$ Pearson 0.941 → 0.920). Agreement is not accuracy, since plain models on two platforms can share the same error (e.g. assigning truncated reads to short isoforms). Real-data accuracy needs spike-ins with known isoform molarities: SIRVs in the WTC11 PacBio libraries, and SIRV/sequins in SG-NEx.
+
 ## Requirements added 2026-10-27
 
 - Primer and coverage bias awareness. Parse (oligo-dT and random-hexamer RT in the same cell), Smart-seq2 (3' bias in degraded samples) and LR (5' truncation, length-dependent capture) all violate $c_{let}=1$, $b_{lt}=$ effective length. The bias model enters through $b_{lt}$ (expected reads per molecule, integrating a positional density over transcript coordinates) and $c_{let}$ (the share of that density falling in positions that produce EC $e$). This needs read positions, which kallisto's TCC output drops. Options are tealeaf's aligner (it already computes primer-specific read opportunities for Parse), salmon/alevin-fry selective alignment, or minimap2 for LR. Bias parameters (a few per library and primer, e.g. a positional density on relative coordinates) can be fitted by an outer M-step.

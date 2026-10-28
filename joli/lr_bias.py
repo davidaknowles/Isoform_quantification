@@ -120,21 +120,23 @@ def fit_with_truncation(em, models, n_outer=10, run_kw=None, verbose=False):
 
     Args:
         em     : JointEM whose long-read libraries carry Library.feat from TruncationModel.features.
+                 Their current c (e.g. alignment-score weights) multiplies the truncation weights.
         models : dict {library index: TruncationModel}.
         n_outer: number of outer iterations.
     Returns:
         JointResult of the final run; models are updated in place.
     """
     run_kw = dict(run_kw or {})
+    base = {l: em.libs[l].c.copy() for l in models}      # e.g. alignment-score weights
     for l, m in models.items():
         fl = em.libs[l]
-        em.set_bias(l, c=m.weights(fl.tx, fl.feat))
+        em.set_bias(l, c=base[l] * m.weights(fl.tx, fl.feat))
     res = em.run(**run_kw)
     for it in range(n_outer):
         for l, m in models.items():
             fl = em.libs[l]
             m.mstep(fl.tx, fl.feat, em.position_counts(res.theta, l))
-            em.set_bias(l, c=m.weights(fl.tx, fl.feat))
+            em.set_bias(l, c=base[l] * m.weights(fl.tx, fl.feat))
         # floor so transcripts zeroed by the previous run's final round can return
         res = em.run(init_theta=np.maximum(res.theta, 1e-10), **run_kw)
         if verbose:
