@@ -27,6 +27,22 @@ PAF_COLS = ["read", "qlen", "qstart", "qend", "strand", "tx", "tlen", "tstart", 
             "nmatch", "alen", "mapq"]
 
 
+def read_fasta_lengths(path):
+    """Transcript names (first header word) and sequence lengths of a fasta, in file order."""
+    names, lens, n = [], [], 0
+    with open(path) as fh:
+        for line in fh:
+            if line.startswith(">"):
+                if names:
+                    lens.append(n)
+                names.append(line[1:].split()[0])
+                n = 0
+            else:
+                n += len(line.strip())
+    lens.append(n)
+    return names, np.array(lens)
+
+
 def read_paf(path, chunksize=2_000_000):
     """
     Read a minimap2 PAF (with -c, so AS:i is present) into a DataFrame with

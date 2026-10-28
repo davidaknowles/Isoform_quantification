@@ -129,15 +129,23 @@ class LengthBias:
     """
 
     def __init__(self, tx_len, knots=(500, 1000, 2000, 4000, 8000), ridge=1.0):
-        logL = np.log(np.maximum(np.asarray(tx_len, dtype=np.float64), 1.0))
-        cols = [logL] + [np.maximum(0.0, logL - np.log(k)) for k in knots]
-        self.X = np.column_stack(cols)
-        self.X -= self.X.mean(axis=0)
+        self.knots = tuple(knots)
+        X = self._basis(tx_len)
+        self.center = X.mean(axis=0)
+        self.X = X - self.center
         self.w = np.zeros(self.X.shape[1])
         self.ridge = ridge
 
+    def _basis(self, lengths):
+        logL = np.log(np.maximum(np.asarray(lengths, dtype=np.float64), 1.0))
+        return np.column_stack([logL] + [np.maximum(0.0, logL - np.log(k)) for k in self.knots])
+
     def rates(self):
         return np.exp(self.X @ self.w)
+
+    def rates_at(self, lengths):
+        """b at arbitrary lengths, on the same scale as rates()."""
+        return np.exp((self._basis(lengths) - self.center) @ self.w)
 
     def mstep(self, Z, mu, n_newton=20):
         """Z (T,) expected reads per transcript in the library, mu (T,) its molar mixture."""

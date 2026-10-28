@@ -22,34 +22,18 @@ import sys
 import time
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 from joli.joint import JointEM, molar_to_tpm
 from joli.lr_bias import TruncationModel, fit_with_truncation
-from joli.paf import filter_alignments, library_from_alignments, read_paf
+from joli.paf import filter_alignments, library_from_alignments, read_fasta_lengths, read_paf
 from joli.salmon_io import library_from_salmon
-
-
-def fasta_lengths(path):
-    names, lens, n = [], [], 0
-    with open(path) as fh:
-        for line in fh:
-            if line.startswith(">"):
-                if names:
-                    lens.append(n)
-                names.append(line[1:].split()[0])
-                n = 0
-            else:
-                n += len(line.strip())
-    lens.append(n)
-    return names, np.array(lens)
 
 
 def main(bs, wtc11_dir, ref_fasta, out_dir, mm_subdir="minimap2", lr_only=False):
     wtc11_dir, out_dir = Path(wtc11_dir), Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    names, tx_len = fasta_lengths(ref_fasta)
+    names, tx_len = read_fasta_lengths(ref_fasta)
     t0 = time.time()
     sr = {} if lr_only else {
         m: library_from_salmon(f"SR:{m}", wtc11_dir / "salmon" / f"{bs}_{m}", transcript_names=names)
