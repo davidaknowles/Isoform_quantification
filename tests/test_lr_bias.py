@@ -94,3 +94,33 @@ def test_length_bias_recovered_with_reference_library():
     res = fit_bias(em, length={1: lb}, n_outer=10)
     assert abs(lb.w[0] + 0.5) < 0.03, lb.w
     np.testing.assert_allclose(res.theta[0], theta, atol=5e-3)
+
+
+def test_shared_models_pool_across_units():
+    """Two units on the same genes, one long-read library each, sharing one truncation model."""
+    from joli.lr_bias import fit_bias
+    aln0, names, lens, th0 = simulate_nested(np.random.default_rng(3), n_reads=30000)
+    # unit 1: other abundances on unit 0's genes, same read-end process
+    rng1 = np.random.default_rng(5)
+    th1 = rng1.dirichlet(np.ones(len(names)) * 0.5)
+    tx = rng1.choice(len(names), size=30000, p=th1)
+    full = rng1.random(30000) < 0.6
+    start = np.where(full, 0, (rng1.random(30000) * lens[tx]).astype(int))
+    rows = []
+    for r, (t, s) in enumerate(zip(tx, start)):
+        g = t // 2
+        L, S = lens[2 * g], lens[2 * g + 1]
+        s_long = s if t % 2 == 0 else s + (L - S)
+        rows.append((r, names[2 * g], s_long, L, L))
+        if s_long >= L - S:
+            rows.append((r, names[2 * g + 1], s_long - (L - S), S, S))
+    aln1 = pd.DataFrame(rows, columns=["read", "tx", "tstart", "tend", "tlen"])
+    aln1["AS"] = 100.0
+    model = TruncationModel(lens)
+    libs = [library_from_alignments(f"u{u}", filter_alignments(a), names,
+                                    features=model.features(*(filter_alignments(a)[c] for c in ("tstart", "tend", "tlen"))))
+            for u, a in enumerate([aln0, aln1])]
+    res = fit_bias(JointEM(libs, units=[0, 1]), trunc={0: model, 1: model}, n_outer=10)
+    for u, th in enumerate([th0, th1]):
+        assert np.abs(res.theta[u] - th).sum() < 0.15
+    assert model.end3.p[0] > 0.95

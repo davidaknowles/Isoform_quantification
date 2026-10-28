@@ -208,19 +208,60 @@ class LengthBias:
         return np.exp((self._basis(lengths) - self.center) @ self.w)
 
     def mstep(self, Z, mu, n_newton=20):
-        """Z (T,) expected reads per transcript in the library, mu (T,) its molar mixture."""
-        N = Z.sum()
-        XZ = self.X.T @ Z
+        """
+        Z (T,) expected reads per transcript and mu (T,) molar mixture of one
+        library, or lists of them for libraries sharing this length bias: the
+        objective is then sum_l [Z_l . log b - N_l log sum_t mu_lt b_t].
+        """
+        Zs = Z if isinstance(Z, (list, tuple)) else [Z]
+        mus = mu if isinstance(mu, (list, tuple)) else [mu]
+        Ns = [z.sum() for z in Zs]
+        XZ = sum(self.X.T @ z for z in Zs)
+        P = len(self.w)
         for _ in range(n_newton):
-            pb = mu * self.rates()
-            p = pb / pb.sum()
-            m = self.X.T @ p
-            grad = XZ - N * m - self.ridge * self.w
-            H = N * ((self.X * p[:, None]).T @ self.X - np.outer(m, m)) + self.ridge * np.eye(len(self.w))
+            r = self.rates()
+            grad = XZ - self.ridge * self.w
+            H = self.ridge * np.eye(P)
+            for N, m_ in zip(Ns, mus):
+                pb = m_ * r
+                p = pb / pb.sum()
+                m = self.X.T @ p
+                grad -= N * m
+                H += N * ((self.X * p[:, None]).T @ self.X - np.outer(m, m))
             step = np.linalg.solve(H, grad)
             self.w += step
             if np.abs(step).max() < 1e-8:
                 break
+
+
+class FeatureColumns:
+    """
+    Adapter so a positional model reads selected columns of a library's
+    stacked features (several models' features stored side by side, so ECs
+    are exact for each).
+    """
+
+    def __init__(self, model, cols):
+        self.model, self.cols = model, list(cols)
+
+    def features(self, start, end, tlen):
+        return self.model.features(start, end, tlen)
+
+    def weights(self, tx, feat):
+        return self.model.weights(tx, feat[:, self.cols])
+
+    def mstep(self, tx, feat, z):
+        self.model.mstep(tx, feat[:, self.cols], z)
+
+
+class StackedFeatures:
+    """Concatenated integer features of several positional models."""
+
+    def __init__(self, models):
+        self.models = list(models)
+
+    def features(self, start, end, tlen):
+        return np.column_stack([m.features(start, end, tlen) for m in self.models])
 
 
 def fit_bias(em, trunc=None, length=None, n_outer=10, run_kw=None, verbose=False):
@@ -233,8 +274,9 @@ def fit_bias(em, trunc=None, length=None, n_outer=10, run_kw=None, verbose=False
                  lengths) are kept as base values that the bias factors multiply.
         trunc  : dict {library index: positional model} -- TruncationModel (long reads) or
                  ReadPositionModel (short reads); any object with features/weights/mstep.
-                 The library's c becomes base c x b_t x q(position | t).
-        length : dict {library index: LengthBias}.
+                 The library's c becomes base c x b_t x q(position | t). Libraries mapped to
+                 the same model object share it (one pooled M-step).
+        length : dict {library index: LengthBias}, shared in the same way.
         n_outer: number of outer iterations.
     Returns:
         JointResult of the final run; models are updated in place.
@@ -262,20 +304,31 @@ def fit_bias(em, trunc=None, length=None, n_outer=10, run_kw=None, verbose=False
     apply()
     res = em.run(**run_kw)
     for it in range(n_outer):
-        for l in libs:
-            fl = em.libs[l]
-            if l in trunc:
-                trunc[l].mstep(fl.tx, fl.feat, em.position_counts(res.theta, l))
-            if l in length:
+        # one M-step per model object, pooling the libraries that share it
+        for model, ls in _by_model(trunc).items():
+            fls = [em.libs[l] for l in ls]
+            model.mstep(np.concatenate([fl.tx for fl in fls]), np.concatenate([fl.feat for fl in fls]),
+                        np.concatenate([em.position_counts(res.theta, l) for l in ls]))
+        for model, ls in _by_model(length).items():
+            mus = []
+            for l in ls:
                 ks = np.flatnonzero(em.pi[l] > 0)
-                mu = em.pi[l, ks] @ res.theta[ks]
-                length[l].mstep(res.expected_reads[l], mu * base_b[l])
+                mus.append((em.pi[l, ks] @ res.theta[ks]) * base_b[l])
+            model.mstep([res.expected_reads[l] for l in ls], mus)
         apply()
         # floor so transcripts zeroed by the previous run's final round can return
         res = em.run(init_theta=np.maximum(res.theta, 1e-10), **run_kw)
         if verbose:
             print(f"[bias] outer {it + 1}: loglik={res.loglik[-1]:.6e} n_iter={res.n_iter}", flush=True)
     return res
+
+
+def _by_model(d):
+    """Group library indices by model object identity."""
+    groups = {}
+    for l, m in d.items():
+        groups.setdefault(id(m), (m, []))[1].append(l)
+    return {m: ls for m, ls in groups.values()}
 
 
 def fit_with_truncation(em, models, n_outer=10, run_kw=None, verbose=False):

@@ -26,12 +26,13 @@ import pandas as pd
 
 from joli.evaluate import concordance_metrics, read_t2g
 from joli.joint import JointEM, molar_to_tpm
-from joli.lr_bias import ReadPositionModel, fit_bias
+from joli.lr_bias import FeatureColumns, ReadPositionModel, StackedFeatures, fit_bias
 from joli.paf import read_fasta_lengths
 from joli.rad import libraries_from_molecules, load_rad_dump, molecule_alignments
 
 READ_LEN = 150
 PRIMERS = {"poly(dT)": ("dT", "3p"), "random hexamer": ("hex", "relative")}
+COLUMN = {"poly(dT)": 0, "random hexamer": 1}      # column of each primer in the stacked features
 
 
 def main(series_dir, ref_dir, out_dir, fraction=1.0, min_cells=200):
@@ -68,7 +69,7 @@ def main(series_dir, ref_dir, out_dir, fraction=1.0, min_cells=200):
     aln = aln[keep_cells[aln["cell"].to_numpy()]]
     group_rates = {g: rates[g.rsplit("|", 1)[1]] for g in cells["group"].unique()}
     models = {p: ReadPositionModel(tx_len, READ_LEN, mode=m) for p, (_, m) in PRIMERS.items()}
-    feat_model = _StackedFeatures(models)
+    feat_model = StackedFeatures(models.values())
     lib_of = libraries_from_molecules(aln, cells["group"].to_numpy(), names, group_rates, model=feat_model)
     print(f"{len(units)} units, {len(lib_of)} libraries", flush=True)
 
@@ -80,11 +81,11 @@ def main(series_dir, ref_dir, out_dir, fraction=1.0, min_cells=200):
         fits = {}
         for p, (short, mode) in PRIMERS.items():
             fits[short] = ([L[p]], {})
-            fits[f"{short}+pos"] = ([L[p]], {0: _single(ReadPositionModel(tx_len, READ_LEN, mode=mode), p)})
+            fits[f"{short}+pos"] = ([L[p]], {0: FeatureColumns(ReadPositionModel(tx_len, READ_LEN, mode=mode), [COLUMN[p]])})
         both = [L["poly(dT)"], L["random hexamer"]]
         fits["dT+hex"] = (both, {})
-        fits["dT+hex+pos"] = (both, {0: _single(ReadPositionModel(tx_len, READ_LEN, mode="3p"), "poly(dT)"),
-                                     1: _single(ReadPositionModel(tx_len, READ_LEN, mode="relative"), "random hexamer")})
+        fits["dT+hex+pos"] = (both, {0: FeatureColumns(ReadPositionModel(tx_len, READ_LEN, mode="3p"), [0]),
+                                     1: FeatureColumns(ReadPositionModel(tx_len, READ_LEN, mode="relative"), [1])})
         for fit, (libs_f, pos) in fits.items():
             t0 = time.time()
             em = JointEM(libs_f, units=[0] * len(libs_f))
@@ -120,31 +121,6 @@ def main(series_dir, ref_dir, out_dir, fraction=1.0, min_cells=200):
         pd.concat(profiles).to_csv(out_dir / "position_profiles.tsv", sep="\t", index=False)
     pd.DataFrame({f"{u}|{f}": v for (u, f), v in tpm.items()}, index=names).to_csv(
         out_dir / "tpm.tsv.gz", sep="\t", float_format="%.6g")
-
-
-class _StackedFeatures:
-    """Features of both primers' position models, so ECs are exact for either."""
-
-    def __init__(self, models):
-        self.models = list(models.values())
-
-    def features(self, start, end, tlen):
-        return np.column_stack([m.features(start, end, tlen) for m in self.models])
-
-
-class _single:
-    """Adapter: a ReadPositionModel reading its own column of the stacked features."""
-
-    COLUMN = {"poly(dT)": 0, "random hexamer": 1}
-
-    def __init__(self, model, primer):
-        self.model, self.col = model, self.COLUMN[primer]
-
-    def weights(self, tx, feat):
-        return self.model.weights(tx, feat[:, [self.col]])
-
-    def mstep(self, tx, feat, z):
-        self.model.mstep(tx, feat[:, [self.col]], z)
 
 
 if __name__ == "__main__":
