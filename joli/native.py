@@ -57,27 +57,31 @@ def _check(ec_ptr, tx, c, counts, mu):
 
 
 def gather_index(tx, ec, n_tx):
-    """Transcript-sorted index of positions for joli_estep_gather: (tx_ptr, perm, pos_ec_sorted)."""
+    """
+    Transcript-sorted index of positions for joli_estep_gather: (tx_ptr, perm,
+    pos_ec_sorted). The caller passes c[perm] (c in transcript order) to estep.
+    """
     perm = np.argsort(tx, kind="stable").astype(np.int64)
     tx_ptr = np.r_[0, np.cumsum(np.bincount(tx, minlength=n_tx))].astype(np.int64)
     return tx_ptr, perm, np.ascontiguousarray(ec[perm], dtype=np.int64)
 
 
-def estep(ec_ptr, tx, c, counts, mu, threads=None, index=None):
+def estep(ec_ptr, tx, c, counts, mu, threads=None, index=None, c_sorted=None):
     """
     Returns (g, ll): g (T,) with g_t = sum_e n_e c_et / denom_e and
     ll = sum_e n_e log denom_e, over ECs with denom_e > 0. With more than one
-    thread and a gather_index, runs the accumulator-free two-pass kernel.
+    thread, a gather_index and c_sorted = c[perm], runs the accumulator-free
+    two-pass kernel.
     """
     lib = _load()
     _check(ec_ptr, tx, c, counts, mu)
     threads = threads or default_threads()
     g = np.empty(len(mu), dtype=np.float64)
-    if threads > 1 and index is not None:
-        tx_ptr, perm, pos_ec = index
+    if threads > 1 and index is not None and c_sorted is not None:
+        tx_ptr, _, pos_ec = index
         ratio = np.empty(len(counts), dtype=np.float64)
         ll = lib.joli_estep_gather(len(counts), _p(ec_ptr), _p(tx), _p(c), _p(counts), _p(mu), len(mu),
-                                   _p(tx_ptr), _p(perm), _p(pos_ec), _p(ratio), _p(g), threads)
+                                   _p(tx_ptr), _p(c_sorted), _p(pos_ec), _p(ratio), _p(g), threads)
     else:
         ll = lib.joli_estep(len(counts), _p(ec_ptr), _p(tx), _p(c), _p(counts), _p(mu), len(mu), _p(g), threads)
     return g, ll

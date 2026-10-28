@@ -43,13 +43,27 @@ def test_rust_matches_numpy():
 
 def test_multithreaded_kernels_match_numpy():
     rng = np.random.default_rng(1)
-    lib = random_library(rng, T=20000, E=150000)          # ~450k positions: 4 threads used
-    em_np = JointEM([lib], backend="numpy")
-    em_rs = JointEM([lib], backend="rust", threads=4)
-    assert em_rs.libs[0].ec_ptr[-1] > 4 * 100_000
-    theta = rng.dirichlet(np.ones(em_np.T))[None, :]
-    Z0, _, ll0, _ = em_np._estep(theta)
-    Z1, _, ll1, _ = em_rs._estep(theta)
+    lib = random_library(rng, T=20000, E=150000)          # ~450k positions
+    em = JointEM([lib], backend="numpy")
+    fl = em.libs[0]
+    theta = rng.dirichlet(np.ones(em.T))[None, :]
+    mu = theta[0]
+    g0, ll0 = em._library_estep(0, mu, 1)
+    index = native.gather_index(fl.tx, fl.ec, em.T)
+    for threads in [1, 4]:
+        g1, ll1 = native.estep(fl.ec_ptr, fl.tx, fl.c, fl.counts, mu, threads, index, np.ascontiguousarray(fl.c[index[1]]))
+        np.testing.assert_allclose(g1, g0, rtol=1e-10, atol=1e-12)
+        np.testing.assert_allclose(ll1, ll0, rtol=1e-12)
+        z = native.position_counts(fl.ec_ptr, fl.tx, fl.c, fl.counts, mu, threads)
+        np.testing.assert_allclose(z, em.position_counts(theta, 0), rtol=1e-10, atol=1e-12)
+
+
+def test_library_parallel_estep_matches_numpy():
+    rng = np.random.default_rng(2)
+    libs = [random_library(rng, T=5000, E=120000) for _ in range(4)]   # > 1M positions in total
+    theta = rng.dirichlet(np.ones(5000), size=2)
+    Z0, D0, ll0, _ = JointEM(libs, units=[0, 0, 1, 1], backend="numpy")._estep(theta)
+    Z1, D1, ll1, _ = JointEM(libs, units=[0, 0, 1, 1], backend="rust", threads=4)._estep(theta)
     np.testing.assert_allclose(Z1, Z0, rtol=1e-10, atol=1e-12)
+    np.testing.assert_allclose(D1, D0, rtol=1e-12)
     np.testing.assert_allclose(ll1, ll0, rtol=1e-12)
-    np.testing.assert_allclose(em_rs.position_counts(theta, 0), em_np.position_counts(theta, 0), rtol=1e-10, atol=1e-12)

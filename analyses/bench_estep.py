@@ -32,3 +32,12 @@ lr = library_from_alignments("lr", filter_alignments(read_paf("/gpfs/commons/hom
 for backend, threads in [("numpy", None), ("rust", 1), ("rust", 4), ("rust", 16)]:
     t = time.time(); r = JointEM(cases["sim SR (salmon)"] + [lr], units=[0, 0], backend=backend, threads=threads).run()
     print(f"sim SR+LR full fit {backend}: {time.time()-t:.1f} s, {r.n_iter} MM steps, loglik {r.loglik[-1]:.4f}", flush=True)
+# many libraries (stand-in for pseudobulk fits): 16 copies of the sim SR library as separate units
+libs16 = cases["sim SR (salmon)"] * 16
+for backend, threads in [("numpy", None), ("rust", 1), ("rust", 4), ("rust", 16)]:
+    em = JointEM(libs16, units=list(range(16)), backend=backend, threads=threads)
+    theta = em.active / em.active.sum(1, keepdims=True)
+    em._estep(theta)
+    t = time.time(); n = 3
+    for _ in range(n): em._estep(theta)
+    print(f"16 libraries x {em.libs[0].n_ec} ECs | {backend:5s} threads={threads}: {(time.time() - t) / n * 1000:.1f} ms/E-step", flush=True)

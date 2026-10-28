@@ -147,36 +147,58 @@ class JointEM:
             seen[fl.tx] = True
             self.active[self.pi[l] > 0] |= seen
 
+    def _library_estep(self, l, mu, threads):
+        """(g, sum_e n_e log denom_e) for library l at molar mixture mu."""
+        fl = self.libs[l]
+        if self.backend == "rust":
+            from . import native
+            if threads > 1:
+                if getattr(fl, "gather", None) is None:
+                    fl.gather = native.gather_index(fl.tx, fl.ec, self.T)
+                if getattr(fl, "c_sorted", None) is None:      # reset by set_bias
+                    fl.c_sorted = np.ascontiguousarray(fl.c[fl.gather[1]])
+                return native.estep(fl.ec_ptr, fl.tx, fl.c, fl.counts, mu, threads, fl.gather, fl.c_sorted)
+            return native.estep(fl.ec_ptr, fl.tx, fl.c, fl.counts, mu, 1)
+        w = mu[fl.tx] * fl.c                                    # per position
+        denom = np.bincount(fl.ec, weights=w, minlength=fl.n_ec)
+        ok = denom > TOLERANCE
+        ratio = np.where(ok, fl.counts / np.where(ok, denom, 1.0), 0.0)
+        r_pos = fl.c * ratio[fl.ec]                             # n_e c_et / denom_e
+        g = np.bincount(fl.tx, weights=r_pos, minlength=self.T)  # sum_e n_e c_et / denom_e
+        return g, float(fl.counts[ok] @ np.log(denom[ok]))
+
     def _estep(self, theta, expected_reads=False):
-        """Return Z (K, T), D (K, T), loglik, and expected reads per library (L, T) if requested (else None)."""
+        """
+        Return Z (K, T), D (K, T), loglik, and expected reads per library (L, T)
+        if requested (else None). With the rust backend and several threads,
+        libraries run concurrently (ctypes releases the GIL); a single library
+        is split across threads only if it has >= 5M positions per thread.
+        """
         Z = np.zeros((self.K, self.T))
         D = np.zeros((self.K, self.T))
         R = np.zeros((self.L, self.T)) if expected_reads else None
+        mus = [self.pi[l, self.pi[l] > 0] @ theta[self.pi[l] > 0] for l in range(self.L)]
+        threads = 1
+        if self.backend == "rust":
+            from . import native
+            threads = self.threads or native.default_threads()
+        if threads > 1 and self.L > 1 and sum(len(fl.tx) for fl in self.libs) >= 1_000_000:
+            if getattr(self, "_pool", None) is None:
+                from concurrent.futures import ThreadPoolExecutor
+                self._pool = ThreadPoolExecutor(max_workers=threads)
+            out = list(self._pool.map(lambda l: self._library_estep(l, mus[l], 1), range(self.L)))
+        else:
+            out = [self._library_estep(l, mus[l], min(threads, max(1, len(fl.tx) // 5_000_000)))
+                   for l, fl in enumerate(self.libs)]
         loglik = 0.0
         for l, fl in enumerate(self.libs):
-            ks = np.flatnonzero(self.pi[l] > 0)
-            mu = self.pi[l, ks] @ theta[ks]                     # (T,)
+            g, ll = out[l]
+            mu = mus[l]
             B = float(mu @ fl.b)
-            if self.backend == "rust":
-                from . import native
-                # at least 100k positions per thread; small libraries use the single-thread kernel
-                threads = min(self.threads or native.default_threads(), max(1, len(fl.tx) // 100_000))
-                if threads > 1 and getattr(fl, "gather", None) is None:
-                    fl.gather = native.gather_index(fl.tx, fl.ec, self.T)
-                g, ll = native.estep(fl.ec_ptr, fl.tx, fl.c, fl.counts, mu, threads,
-                                     fl.gather if threads > 1 else None)
-                loglik += ll - fl.N * np.log(B)
-            else:
-                w = mu[fl.tx] * fl.c                            # per position
-                denom = np.bincount(fl.ec, weights=w, minlength=fl.n_ec)
-                ok = denom > TOLERANCE
-                loglik += float(fl.counts[ok] @ np.log(denom[ok])) - fl.N * np.log(B)
-                ratio = np.where(ok, fl.counts / np.where(ok, denom, 1.0), 0.0)
-                r_pos = fl.c * ratio[fl.ec]                     # n_e c_et / denom_e
-                g = np.bincount(fl.tx, weights=r_pos, minlength=self.T)   # sum_e n_e c_et / denom_e
+            loglik += ll - fl.N * np.log(B)
             if expected_reads:
                 R[l] = mu * g
-            for k in ks:
+            for k in np.flatnonzero(self.pi[l] > 0):
                 Z[k] += self.pi[l, k] * theta[k] * g
                 D[k] += fl.N * self.pi[l, k] * fl.b / B
         return Z, D, loglik, R
@@ -192,7 +214,8 @@ class JointEM:
         mu = self.pi[l, ks] @ theta[ks]
         if self.backend == "rust":
             from . import native
-            return native.position_counts(fl.ec_ptr, fl.tx, fl.c, fl.counts, mu, self.threads)
+            return native.position_counts(fl.ec_ptr, fl.tx, fl.c, fl.counts, mu,
+                                          min(self.threads or native.default_threads(), max(1, len(fl.tx) // 1_000_000)))
         w = mu[fl.tx] * fl.c
         denom = np.bincount(fl.ec, weights=w, minlength=fl.n_ec)
         return np.where(denom[fl.ec] > TOLERANCE, fl.counts[fl.ec] * w / np.maximum(denom[fl.ec], TOLERANCE), 0.0)
@@ -201,6 +224,7 @@ class JointEM:
         """Replace library l's flat compatibility weights c (aligned with its flat layout) and/or rates b."""
         if c is not None:
             self.libs[l].c = np.ascontiguousarray(c, dtype=np.float64)
+            self.libs[l].c_sorted = None
         if b is not None:
             self.libs[l].b = np.ascontiguousarray(b, dtype=np.float64)
 

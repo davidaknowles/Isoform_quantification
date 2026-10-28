@@ -173,8 +173,9 @@ pub unsafe extern "C" fn joli_position_counts(
 /// blocks) writes r_e = counts[e] / denom_e (0 if denom_e is not positive)
 /// to ratio_buf (n_ec) and sums counts[e] log denom_e. Pass 2 (over
 /// transcript blocks) gathers g[t] = sum_{p of t} r_{ec(p)} c_p through the
-/// transcript-sorted index: positions perm[tx_ptr[t]..tx_ptr[t+1]] belong to
-/// transcript t and pos_ec_sorted[i] = EC of position perm[i].
+/// transcript-sorted index: sorted slots tx_ptr[t]..tx_ptr[t+1] belong to
+/// transcript t, pos_ec_sorted[i] is the EC and c_sorted[i] the weight of
+/// the position in slot i (c in transcript order, so pass 2 reads it sequentially).
 #[no_mangle]
 pub unsafe extern "C" fn joli_estep_gather(
     n_ec: usize,
@@ -185,7 +186,7 @@ pub unsafe extern "C" fn joli_estep_gather(
     mu: *const f64,
     n_tx: usize,
     tx_ptr: *const i64,
-    perm: *const i64,
+    c_sorted: *const f64,
     pos_ec_sorted: *const i64,
     ratio_buf: *mut f64,
     g_out: *mut f64,
@@ -198,7 +199,7 @@ pub unsafe extern "C" fn joli_estep_gather(
     let counts = slice::from_raw_parts(counts, n_ec);
     let mu = slice::from_raw_parts(mu, n_tx);
     let tx_ptr = slice::from_raw_parts(tx_ptr, n_tx + 1);
-    let perm = slice::from_raw_parts(perm, n_pos);
+    let c_sorted = slice::from_raw_parts(c_sorted, n_pos);
     let pos_ec_sorted = slice::from_raw_parts(pos_ec_sorted, n_pos);
     let ratio = slice::from_raw_parts_mut(ratio_buf, n_ec);
     let g = slice::from_raw_parts_mut(g_out, n_tx);
@@ -252,7 +253,7 @@ pub unsafe extern "C" fn joli_estep_gather(
                     let t = t0 + i;
                     let mut acc = 0.0;
                     for k in tx_ptr[t] as usize..tx_ptr[t + 1] as usize {
-                        acc += ratio[pos_ec_sorted[k] as usize] * c[perm[k] as usize];
+                        acc += ratio[pos_ec_sorted[k] as usize] * c_sorted[k];
                     }
                     *gt = acc;
                 }
