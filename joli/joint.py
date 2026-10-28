@@ -55,13 +55,18 @@ class Library:
         b        : np.ndarray (T,)   -- sampling rate per transcript (eff_len for SR, 1 for LR).
         platform : str               -- "short" | "long" (informational).
         c        : list[np.ndarray] | None -- optional per-EC compatibility weights,
+                   (any per-EC constant factor cancels in the EM)
                    c[e][i] for the i-th transcript of EC e; None means all ones.
+        feat     : list[np.ndarray] | None -- optional per-EC integer features,
+                   feat[e][i] (n_features,) for the i-th transcript of EC e, used by
+                   bias models that recompute c (e.g. binned read-end positions).
     """
     name: str
     tcc: TCCData
     b: np.ndarray
     platform: str = "long"
     c: list = None
+    feat: list = None
 
 
 class _FlatLibrary:
@@ -77,6 +82,9 @@ class _FlatLibrary:
             self.c = np.ones(len(self.tx), dtype=np.float64)
         else:
             self.c = np.concatenate([np.asarray(lib.c[e], dtype=np.float64) for e in keep])
+        self.feat = None if lib.feat is None else \
+            np.concatenate([np.asarray(lib.feat[e]).reshape(sizes[i], -1) for i, e in enumerate(keep)])
+        self.keep = keep                     # flat EC i is lib.tcc EC keep[i]
         self.counts = counts[keep]
         self.n_ec = len(keep)
         self.N = float(self.counts.sum())
@@ -151,6 +159,26 @@ class JointEM:
                 Z[k] += self.pi[l, k] * theta[k] * g
                 D[k] += fl.N * self.pi[l, k] * fl.b / B
         return Z, D, loglik, R
+
+    def position_counts(self, theta, l):
+        """
+        Expected reads per (EC, transcript) position of library l,
+        z_lp = n_e mu_t c_et / sum_{t' in e} mu_t' c_et', as a flat array
+        aligned with the library's flat EC layout (for M-steps of bias models).
+        """
+        fl = self.libs[l]
+        ks = np.flatnonzero(self.pi[l] > 0)
+        mu = self.pi[l, ks] @ theta[ks]
+        w = mu[fl.tx] * fl.c
+        denom = np.bincount(fl.ec, weights=w, minlength=fl.n_ec)
+        return np.where(denom[fl.ec] > TOLERANCE, fl.counts[fl.ec] * w / np.maximum(denom[fl.ec], TOLERANCE), 0.0)
+
+    def set_bias(self, l, c=None, b=None):
+        """Replace library l's flat compatibility weights c (aligned with its flat layout) and/or rates b."""
+        if c is not None:
+            self.libs[l].c = np.asarray(c, dtype=np.float64)
+        if b is not None:
+            self.libs[l].b = np.asarray(b, dtype=np.float64)
 
     def _update(self, theta, a):
         """One MM step. Returns (new theta, log posterior at the input theta)."""
