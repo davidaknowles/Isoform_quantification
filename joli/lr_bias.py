@@ -1,6 +1,9 @@
 """
 lr_bias.py
 ==========
+Bias models: read-end truncation for long reads, read position for
+single-cell short reads, and per-library length-dependent sampling.
+
 Read-end (truncation) model for long reads.
 
 A long read aligned to transcript t (length L_t) at [s, e) leaves d5 = s
@@ -114,6 +117,63 @@ class TruncationModel:
         self.end3.mstep(np.bincount(feat[:, 1], weights=z, minlength=self.end3.J), Z, self.O3)
 
 
+REL_EDGES = np.linspace(0.0, 1.0, 21)
+D3_EDGES = np.array([0, 25, 50, 100, 150, 200, 300, 400, 500, 750, 1000, 1500, 2000, 3000,
+                     5000, 10000, 30000, 100000, 3e6], dtype=np.float64)
+
+
+class ReadPositionModel:
+    """
+    Distribution of short-read positions along transcripts, for single-cell
+    libraries where read position depends on the RT primer.
+
+    A read of length r on transcript t (length L_t) starts at s in
+    {0, ..., L_t - r}. Two parametrisations, each a distribution p over bins:
+      mode "3p"       : bins of d3 = L_t - (s + r), the bases between the read and
+                        the 3' end (poly(dT) priming: fragments hang off the poly(A)
+                        tail), normalised over the d3 values that fit, as EndProfile.
+      mode "relative" : bins of u = s / (L_t - r) on [0, 1] (random-hexamer priming),
+                        q(s | t) = p_j / (w_j (L_t - r + 1)).
+    weights() returns the density q(s | t); fit_bias multiplies it by the library's
+    sampling rate b_t, so a uniform profile reproduces the position-free model when
+    b_t = L_t - r + 1.
+    """
+
+    def __init__(self, tx_len, read_len=150, mode="3p", edges=None):
+        self.mode = mode
+        self.span = np.maximum(np.asarray(tx_len, dtype=np.float64) - read_len, 0.0)  # max start / max d3
+        if mode == "3p":
+            self.prof = EndProfile(D3_EDGES if edges is None else edges)
+            self.O = self.prof.overlap(self.span)
+        elif mode == "relative":
+            self.prof = EndProfile(REL_EDGES if edges is None else edges)
+            self.O = None
+        else:
+            raise ValueError(mode)
+
+    def features(self, start, end, tlen):
+        """Integer feature (n, 1): bin of d3 or of the relative start."""
+        start, end, tlen = (np.asarray(x, dtype=np.float64) for x in (start, end, tlen))
+        if self.mode == "3p":
+            return self.prof.bin(np.maximum(tlen - end, 0.0))[:, None]
+        rel = start / np.maximum(tlen - (end - start), 1.0)
+        return np.clip(np.searchsorted(self.prof.edges, rel, side="right") - 1, 0, self.prof.J - 1)[:, None]
+
+    def weights(self, tx, feat):
+        j = feat[:, 0]
+        if self.mode == "3p":
+            return self.prof.weight(j, tx, self.prof.norm(self.O))
+        return self.prof.p[j] / self.prof.width[j] / (self.span[tx] + 1.0)
+
+    def mstep(self, tx, feat, z):
+        A = np.bincount(feat[:, 0], weights=z, minlength=self.prof.J)
+        if self.mode == "3p":
+            self.prof.mstep(A, np.bincount(tx, weights=z, minlength=len(self.span)), self.O)
+        else:
+            p = A + 1e-3
+            self.prof.p = p / p.sum()
+
+
 class LengthBias:
     """
     Library-specific sampling rate as a smooth function of transcript length,
@@ -171,7 +231,9 @@ def fit_bias(em, trunc=None, length=None, n_outer=10, run_kw=None, verbose=False
         em     : JointEM. Libraries in `trunc` carry Library.feat from TruncationModel.features.
                  Each library's initial c and b (e.g. alignment-score weights, effective
                  lengths) are kept as base values that the bias factors multiply.
-        trunc  : dict {library index: TruncationModel}.
+        trunc  : dict {library index: positional model} -- TruncationModel (long reads) or
+                 ReadPositionModel (short reads); any object with features/weights/mstep.
+                 The library's c becomes base c x b_t x q(position | t).
         length : dict {library index: LengthBias}.
         n_outer: number of outer iterations.
     Returns:
@@ -189,7 +251,8 @@ def fit_bias(em, trunc=None, length=None, n_outer=10, run_kw=None, verbose=False
             c = base_c[l].copy()
             b = base_b[l].copy()
             if l in trunc:
-                c *= trunc[l].weights(fl.tx, fl.feat)
+                # positional density times the base sampling rate (c = b q)
+                c *= trunc[l].weights(fl.tx, fl.feat) * base_b[l][fl.tx]
             if l in length:
                 r = length[l].rates()
                 c *= r[fl.tx]

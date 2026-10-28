@@ -9,3 +9,4 @@ JOLI_Kallisto/debug/
 JOLI_Kallisto/compare_abundance/*.tsv
 *.egg-info/
 analyses/logs/
+rust/*/target/

@@ -1,0 +1,13 @@
+[package]
+name = "radpos"
+version = "0.1.0"
+edition = "2021"
+description = "Dump per-alignment positions from single-cell RAD files with score/start/end/tlen alignment tags"
+
+[dependencies]
+libradicl = "0.14"
+anyhow = "1.0"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

@@ -98,6 +98,41 @@ def score_weight(aln, beta=1.0):
     return np.exp(-beta * aln["AS_gap"].to_numpy(dtype=np.float64))
 
 
+_MIX = (np.uint64(0x9E3779B97F4A7C15), np.uint64(0xC2B2AE3D27D4EB4F))
+
+
+def _splitmix(x, seed):
+    """splitmix64 finaliser of uint64 array x xor seed (wrapping arithmetic)."""
+    with np.errstate(over="ignore"):
+        z = x ^ seed
+        z = (z ^ (z >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
+        z = (z ^ (z >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
+        return z ^ (z >> np.uint64(31))
+
+
+def _set_ids(tx, F, starts):
+    """
+    Class id per read from the set of its (transcript, feature) pairs, using two
+    independent 64-bit sums of mixed element hashes plus the set size (collisions
+    need a simultaneous 128-bit match). Returns (class id per read, first read of
+    each class) with classes numbered by first appearance.
+    """
+    v = tx.astype(np.uint64)
+    if F is not None:
+        with np.errstate(over="ignore"):
+            for k in range(F.shape[1]):
+                v = v * np.uint64(1000003) + F[:, k].astype(np.uint64)
+    with np.errstate(over="ignore"):
+        h1 = np.add.reduceat(_splitmix(v, _MIX[0]), starts)
+        h2 = np.add.reduceat(_splitmix(v, _MIX[1]), starts)
+    n = np.diff(np.r_[starts, len(tx)]).astype(np.uint64)
+    key = pd.DataFrame({"a": h1, "b": h2, "n": n})
+    ec_id = key.groupby(["a", "b", "n"], sort=False).ngroup().to_numpy()
+    first = np.full(ec_id.max() + 1 if len(ec_id) else 0, -1, dtype=np.int64)
+    first[ec_id[::-1]] = np.arange(len(ec_id))[::-1]
+    return ec_id, first
+
+
 def library_from_alignments(name, aln, transcript_names, weight=None, features=None,
                             platform="long", b=None) -> Library:
     """
@@ -110,7 +145,8 @@ def library_from_alignments(name, aln, transcript_names, weight=None, features=N
     the per-read normalised weights (salmon's rich-EC approximation).
 
     Args:
-        aln              : DataFrame from filter_alignments (columns read, tx, ...).
+        aln              : DataFrame from filter_alignments (columns read, and tx names
+                           or tx_idx integer indices into transcript_names).
         transcript_names : list[str] (T,) -- target index order; alignments to
                            transcripts outside it are dropped.
         weight           : np.ndarray (n_aln,) | None -- per-alignment weight w_rt; None means 1.
@@ -118,11 +154,16 @@ def library_from_alignments(name, aln, transcript_names, weight=None, features=N
                            Library.feat and made part of the EC key.
         b                : np.ndarray (T,) | None -- sampling rates; ones by default.
     """
-    pos = pd.Series(np.arange(len(transcript_names)), index=transcript_names)
-    tx = pos.reindex(aln["tx"].astype(str)).to_numpy()
-    keep = ~np.isnan(tx)
+    if "tx_idx" in aln:
+        tx = np.asarray(aln["tx_idx"], dtype=np.int64)
+        keep = (tx >= 0) & (tx < len(transcript_names))
+    else:
+        pos = pd.Series(np.arange(len(transcript_names)), index=transcript_names)
+        tx = pos.reindex(aln["tx"].astype(str)).to_numpy()
+        keep = ~np.isnan(tx)
     tx = tx[keep].astype(np.int64)
-    read = pd.factorize(aln["read"])[0][keep]
+    rd = np.asarray(aln["read"])
+    read = (rd.astype(np.int64) if np.issubdtype(rd.dtype, np.integer) else pd.factorize(rd)[0])[keep]
     w = np.ones(len(tx)) if weight is None else np.asarray(weight, dtype=np.float64)[keep]
     F = None if features is None else np.asarray(features, dtype=np.int64).reshape(len(aln), -1)[keep]
 
@@ -134,14 +175,11 @@ def library_from_alignments(name, aln, transcript_names, weight=None, features=N
     sizes = np.diff(np.r_[starts, len(read)])
     w_norm = w / np.repeat(np.add.reduceat(w, starts), sizes)
 
-    # EC key per read: bytes of its sorted transcripts (and their features)
-    key_arr = tx[:, None] if F is None else np.column_stack([tx, F])
-    keys = [key_arr[s:s + n].tobytes() for s, n in zip(starts, sizes)]
-    ec_id, uniq = pd.factorize(pd.Series(keys), sort=False)
-    E = len(uniq)
+    # EC key per read: an order-independent 128-bit hash of its (transcript, features) set
+    ec_id, first_read = _set_ids(tx, F, starts)
+    E = len(first_read)
     counts = np.bincount(ec_id, minlength=E).astype(np.float64)
-    first = np.full(E, -1, dtype=np.int64)
-    first[ec_id[::-1]] = np.arange(len(ec_id))[::-1]
+    first = first_read
     ec_tx = [tx[starts[e]:starts[e] + sizes[e]] for e in first]
     feat = None if F is None else [F[starts[e]:starts[e] + sizes[e]] for e in first]
     c = None
