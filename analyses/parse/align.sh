@@ -23,7 +23,7 @@ row=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" $SERIES_DIR/libraries.tsv)
 IFS=$'\t' read -r lib read1 read2 <<< "$row"
 D=$SERIES_DIR/$lib
 if [ ! -s $D/salmon_rad/map.rad ]; then
-  $SALMON alevin -i $REF/salmon_spliceu_decoy -l A -1 ${read1//,/ } -2 ${read2//,/ } \
+  $SALMON alevin -i $REF/salmon_spliceu -l A -1 ${read1//,/ } -2 ${read2//,/ } \
     --splitseqV2 --rad --softclip -p $T -o $D/salmon_rad
 fi
 if [ ! -s $D/permit/map.collated.rad ]; then
