@@ -61,7 +61,8 @@ Matching types: exact (same library cDNA or same cells), same biosample, same do
 | Parse brain nuclei (tealeaf: GSE233208 human, GSE189033 mouse) | Parse WT | – | – | nuclei, so intronic/precursor dominated |
 | Tabula Muris (`data/archive/tabula_muris/smart_seq`, ~7.4k files) | Smart-seq2 FACS | – | tissue/cell type to mouse LR | Tabula Muris Senis has metadata only on disk; reads on AWS |
 | Tabula Sapiens | Smart-seq2 (`TabulaSapiens_ss2only.h5ad`, Leaflet/SpliZ outputs; raw BAMs on AWS) | – | tissue/cell type to ENCODE4 human tissue LR | the lab's IsoformGazer uses TS v2 SS2 |
-| NIMH_LRS (Megan, 9.7 TB) | ? | PacBio HiFi, ~99 samples | ? | tissue and matching SR unknown, ask Megan |
+| Allen human cortex (BRAIN/NeMO, controlled, DAC-approved for DAK and Karin) | SMART-seq v4 nuclei, ~50k nuclei, 6 cortical regions (MTG, M1C, CgGr, V1C, S1C, A1C), raw FASTQ (6.7 TB) + 208 MTG neurosurgical (38 GB) | – | cell type/region to ENCODE4 DLPFC PacBio (×9) | ~90% neurons (NeuN sorted), with Allen taxonomy labels; GRU, MTG limited to HMB |
+| Allen mouse MOp (Karin, processed) | SMART-seq v4 cells and nuclei, gene counts only on disk | – | cell type to mouse brain LR | raw reads are open on NeMO; the larger Allen mouse cortex+hippocampus SMART-seq set is also open |
 | GTEx ONT (`ont_gtex`) | GTEx Illumina (dbGaP) | junction BEDs only on disk | same sample | full data: Glinos et al. 2022, 88 samples, 15 tissues |
 
 ### Public, not yet downloaded
@@ -70,8 +71,14 @@ Matching types: exact (same library cDNA or same cells), same biosample, same do
 - LR-Split-seq (Rebboah et al. 2021 Genome Biol): Split-seq SR and LR on the same cells (C2C12). The Mortazavi lab IGVF mouse founder-strain data may extend this to tissues (to check).
 - 10x + LR same-cell sets (ScISOr-Seq/SnISOr-Seq brain, scNanoGPS, SiCeLoRe, FLT-seq, MAS-seq): useful only as LR-per-cell with barcodes.
 
-### Candidate study designs
+NIMH_LRS (PacBio HiFi, ~99 samples) is controlled access and not used.
 
-1. Bulk development: WTC11/H1 SR+LR replicates, SG-NEx with spike-ins.
-2. Single cell, unmatched donors: Parse PBMC SR (many donors, conditions) with Kinnex PBMC LR (different donors). Matching by cell type through the design matrix. The Parse Kinnex library is a same-chemistry anchor.
-3. Atlas: Tabula Sapiens SS2 (cell types × tissues) with ENCODE4 human tissue PacBio (bulk, same tissues, different donors), and Tabula Muris SS2 with ENCODE4 mouse LR. Bulk LR libraries enter as mixtures over cell types with composition $\pi_{lk}$ estimated from SS2/10x references.
+## Paper plan (2026-10-27)
+
+A new paper in three parts.
+
+1. Method development on bulk SR+LR. WTC11/H1 replicates (LRGASP/ENCODE) and SG-NEx (spike-ins, several platforms), plus simulations with known truth. Establishes the joint SR+LR likelihood and the multi-sample empirical Bayes prior against lr-kallisto, oarfish, IsoQuant, MPAQT and miniQuant.
+2. Single cell/nucleus with Parse SR and LR. Parse PBMC SR (many donors and conditions) with Kinnex PBMC LR (different donors, cells barcoded so LR is per cell). Matching by cell type through the design matrix or tree. The Parse Kinnex library is a same-chemistry anchor. Held-out LR cells or donors give a real-data check of SR-only predictions.
+3. Atlas demo: the best available cell-type-resolved map of human and mouse isoform usage. Isoform-informative SR from Tabula Sapiens SS2, Allen human cortex SMART-seq v4 and Parse brain nuclei (human); Tabula Muris/Senis SS2 and Allen mouse SMART-seq (mouse). LR from ENCODE4 PacBio tissues (human and mouse, bulk) and single-cell LR where available. Bulk LR libraries enter as mixtures over cell types with composition $\pi_{lk}$ estimated from single-cell references, and a tissue × cell-type design matrix (or tree) shares information across tissues, regions and studies.
+
+Brain is the tissue where all pieces overlap for human: Allen SMART-seq v4 (cell types × 6 regions), Parse brain nuclei (GSE233208), and ENCODE4 DLPFC PacBio ×9.
