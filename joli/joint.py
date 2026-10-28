@@ -85,6 +85,7 @@ class _FlatLibrary:
         self.feat = None if lib.feat is None else \
             np.concatenate([np.asarray(lib.feat[e]).reshape(sizes[i], -1) for i, e in enumerate(keep)])
         self.keep = keep                     # flat EC i is lib.tcc EC keep[i]
+        self.ec_ptr = np.r_[0, np.cumsum(sizes)].astype(np.int64)   # EC i spans ec_ptr[i]:ec_ptr[i+1]
         self.counts = counts[keep]
         self.n_ec = len(keep)
         self.N = float(self.counts.sum())
@@ -111,9 +112,18 @@ class JointEM:
                     None means each library is its own unit (K = L).
         units     : list[int] | None -- shorthand for one-hot pi: units[l] = k.
         unit_names: list[str] | None
+        backend   : "auto" | "numpy" | "rust" -- E-step implementation; "auto" uses the
+                    compiled kernels (joli.native, rust/joli_kernels) when built.
+        threads   : int | None -- threads for the compiled kernels.
     """
 
-    def __init__(self, libraries, pi=None, units=None, unit_names=None):
+    def __init__(self, libraries, pi=None, units=None, unit_names=None, backend="auto", threads=None):
+        from . import native
+        if backend == "auto":
+            backend = "rust" if native.available() else "numpy"
+        if backend == "rust" and not native.available():
+            raise RuntimeError("rust backend requested but rust/joli_kernels is not built")
+        self.backend, self.threads = backend, threads
         self.libs = [_FlatLibrary(l) for l in libraries]
         self.L = len(self.libs)
         self.T = len(libraries[0].tcc.transcript_names)
@@ -137,24 +147,35 @@ class JointEM:
             seen[fl.tx] = True
             self.active[self.pi[l] > 0] |= seen
 
-    def _estep(self, theta):
-        """Return Z (K, T), D (K, T), loglik, expected reads per library (L, T)."""
+    def _estep(self, theta, expected_reads=False):
+        """Return Z (K, T), D (K, T), loglik, and expected reads per library (L, T) if requested (else None)."""
         Z = np.zeros((self.K, self.T))
         D = np.zeros((self.K, self.T))
-        R = np.zeros((self.L, self.T))
+        R = np.zeros((self.L, self.T)) if expected_reads else None
         loglik = 0.0
         for l, fl in enumerate(self.libs):
             ks = np.flatnonzero(self.pi[l] > 0)
             mu = self.pi[l, ks] @ theta[ks]                     # (T,)
             B = float(mu @ fl.b)
-            w = mu[fl.tx] * fl.c                                # per position
-            denom = np.bincount(fl.ec, weights=w, minlength=fl.n_ec)
-            ok = denom > TOLERANCE
-            loglik += float(fl.counts[ok] @ np.log(denom[ok])) - fl.N * np.log(B)
-            ratio = np.where(ok, fl.counts / np.where(ok, denom, 1.0), 0.0)
-            r_pos = fl.c * ratio[fl.ec]                         # n_e c_et / denom_e
-            g = np.bincount(fl.tx, weights=r_pos, minlength=self.T)   # sum_e n_e c_et / denom_e
-            R[l] = mu * g
+            if self.backend == "rust":
+                from . import native
+                # at least 100k positions per thread; small libraries use the single-thread kernel
+                threads = min(self.threads or native.default_threads(), max(1, len(fl.tx) // 100_000))
+                if threads > 1 and getattr(fl, "gather", None) is None:
+                    fl.gather = native.gather_index(fl.tx, fl.ec, self.T)
+                g, ll = native.estep(fl.ec_ptr, fl.tx, fl.c, fl.counts, mu, threads,
+                                     fl.gather if threads > 1 else None)
+                loglik += ll - fl.N * np.log(B)
+            else:
+                w = mu[fl.tx] * fl.c                            # per position
+                denom = np.bincount(fl.ec, weights=w, minlength=fl.n_ec)
+                ok = denom > TOLERANCE
+                loglik += float(fl.counts[ok] @ np.log(denom[ok])) - fl.N * np.log(B)
+                ratio = np.where(ok, fl.counts / np.where(ok, denom, 1.0), 0.0)
+                r_pos = fl.c * ratio[fl.ec]                     # n_e c_et / denom_e
+                g = np.bincount(fl.tx, weights=r_pos, minlength=self.T)   # sum_e n_e c_et / denom_e
+            if expected_reads:
+                R[l] = mu * g
             for k in ks:
                 Z[k] += self.pi[l, k] * theta[k] * g
                 D[k] += fl.N * self.pi[l, k] * fl.b / B
@@ -169,6 +190,9 @@ class JointEM:
         fl = self.libs[l]
         ks = np.flatnonzero(self.pi[l] > 0)
         mu = self.pi[l, ks] @ theta[ks]
+        if self.backend == "rust":
+            from . import native
+            return native.position_counts(fl.ec_ptr, fl.tx, fl.c, fl.counts, mu, self.threads)
         w = mu[fl.tx] * fl.c
         denom = np.bincount(fl.ec, weights=w, minlength=fl.n_ec)
         return np.where(denom[fl.ec] > TOLERANCE, fl.counts[fl.ec] * w / np.maximum(denom[fl.ec], TOLERANCE), 0.0)
@@ -176,9 +200,9 @@ class JointEM:
     def set_bias(self, l, c=None, b=None):
         """Replace library l's flat compatibility weights c (aligned with its flat layout) and/or rates b."""
         if c is not None:
-            self.libs[l].c = np.asarray(c, dtype=np.float64)
+            self.libs[l].c = np.ascontiguousarray(c, dtype=np.float64)
         if b is not None:
-            self.libs[l].b = np.asarray(b, dtype=np.float64)
+            self.libs[l].b = np.ascontiguousarray(b, dtype=np.float64)
 
     def _update(self, theta, a):
         """One MM step. Returns (new theta, log posterior at the input theta)."""
@@ -261,7 +285,7 @@ class JointEM:
             theta /= theta.sum(axis=1, keepdims=True)
             theta, _ = self._update(theta, None if a is None else np.where(theta > 0, a, 0.0))
             n_steps += 1
-        _, _, ll, R = self._estep(theta)
+        _, _, ll, R = self._estep(theta, expected_reads=True)
         history.append(ll)
         return JointResult(theta=theta, n_iter=n_steps, converged=converged, loglik=history, expected_reads=R)
 
