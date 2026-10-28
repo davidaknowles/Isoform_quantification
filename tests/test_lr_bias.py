@@ -70,3 +70,27 @@ def test_rich_ec_weights_and_features_collapse():
     feat = np.array([[0], [1], [0], [0], [0]])
     lib2 = library_from_alignments("x", aln, ["t1", "t2"], features=feat)
     assert len(lib2.tcc.ec_counts) == 3
+
+
+def test_length_bias_recovered_with_reference_library():
+    """Two LR libraries share theta; library 1 samples transcripts at rate L^-0.5."""
+    from joli.joint import Library
+    from joli.load_tcc import TCCData
+    from joli.lr_bias import LengthBias, fit_bias
+    rng = np.random.default_rng(1)
+    T = 400
+    L = rng.integers(300, 10000, size=T).astype(float)
+    theta = rng.dirichlet(np.ones(T))
+    libs = []
+    for slope in [0.0, -0.5]:
+        p = theta * L ** slope
+        n = rng.multinomial(200000, p / p.sum()).astype(float)
+        tcc = TCCData(ec_counts=n, ec_transcripts=[np.array([t]) for t in range(T)],
+                      transcript_names=[f"t{t}" for t in range(T)], total_reads=int(n.sum()),
+                      n_targets=T, sample_dir="")
+        libs.append(Library(name=f"l{slope}", tcc=tcc, b=np.ones(T)))
+    em = JointEM(libs, units=[0, 0])
+    lb = LengthBias(L, knots=(), ridge=1e-3)
+    res = fit_bias(em, length={1: lb}, n_outer=10)
+    assert abs(lb.w[0] + 0.5) < 0.03, lb.w
+    np.testing.assert_allclose(res.theta[0], theta, atol=5e-3)

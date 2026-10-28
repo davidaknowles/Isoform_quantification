@@ -114,31 +114,99 @@ class TruncationModel:
         self.end3.mstep(np.bincount(feat[:, 1], weights=z, minlength=self.end3.J), Z, self.O3)
 
 
-def fit_with_truncation(em, models, n_outer=10, run_kw=None, verbose=False):
+class LengthBias:
     """
-    Alternate JointEM runs (warm-started) with truncation-model M-steps.
+    Library-specific sampling rate as a smooth function of transcript length,
+    b_t = exp(x_t . w), with x_t (P,) a piecewise-linear basis in log length
+    (log L and hinges at the knots). It multiplies the library's base rates
+    (1 for long reads, effective length for short reads). A read of transcript
+    t then has P(r, t) proportional to mu_t b_t q(r | t), so b also multiplies c.
+
+    b is confounded with theta unless theta is shared with another library
+    whose rates are fixed (e.g. SR with effective lengths, or a reference LR
+    protocol). The M-step maximises sum_t Z_t log b_t - N log sum_t mu_t b_t
+    (concave in w) by Newton steps with a ridge penalty.
+    """
+
+    def __init__(self, tx_len, knots=(500, 1000, 2000, 4000, 8000), ridge=1.0):
+        logL = np.log(np.maximum(np.asarray(tx_len, dtype=np.float64), 1.0))
+        cols = [logL] + [np.maximum(0.0, logL - np.log(k)) for k in knots]
+        self.X = np.column_stack(cols)
+        self.X -= self.X.mean(axis=0)
+        self.w = np.zeros(self.X.shape[1])
+        self.ridge = ridge
+
+    def rates(self):
+        return np.exp(self.X @ self.w)
+
+    def mstep(self, Z, mu, n_newton=20):
+        """Z (T,) expected reads per transcript in the library, mu (T,) its molar mixture."""
+        N = Z.sum()
+        XZ = self.X.T @ Z
+        for _ in range(n_newton):
+            pb = mu * self.rates()
+            p = pb / pb.sum()
+            m = self.X.T @ p
+            grad = XZ - N * m - self.ridge * self.w
+            H = N * ((self.X * p[:, None]).T @ self.X - np.outer(m, m)) + self.ridge * np.eye(len(self.w))
+            step = np.linalg.solve(H, grad)
+            self.w += step
+            if np.abs(step).max() < 1e-8:
+                break
+
+
+def fit_bias(em, trunc=None, length=None, n_outer=10, run_kw=None, verbose=False):
+    """
+    Alternate JointEM runs (warm-started) with bias-model M-steps.
 
     Args:
-        em     : JointEM whose long-read libraries carry Library.feat from TruncationModel.features.
-                 Their current c (e.g. alignment-score weights) multiplies the truncation weights.
-        models : dict {library index: TruncationModel}.
+        em     : JointEM. Libraries in `trunc` carry Library.feat from TruncationModel.features.
+                 Each library's initial c and b (e.g. alignment-score weights, effective
+                 lengths) are kept as base values that the bias factors multiply.
+        trunc  : dict {library index: TruncationModel}.
+        length : dict {library index: LengthBias}.
         n_outer: number of outer iterations.
     Returns:
         JointResult of the final run; models are updated in place.
     """
+    trunc, length = trunc or {}, length or {}
     run_kw = dict(run_kw or {})
-    base = {l: em.libs[l].c.copy() for l in models}      # e.g. alignment-score weights
-    for l, m in models.items():
-        fl = em.libs[l]
-        em.set_bias(l, c=base[l] * m.weights(fl.tx, fl.feat))
+    libs = set(trunc) | set(length)
+    base_c = {l: em.libs[l].c.copy() for l in libs}
+    base_b = {l: em.libs[l].b.copy() for l in libs}
+
+    def apply():
+        for l in libs:
+            fl = em.libs[l]
+            c = base_c[l].copy()
+            b = base_b[l].copy()
+            if l in trunc:
+                c *= trunc[l].weights(fl.tx, fl.feat)
+            if l in length:
+                r = length[l].rates()
+                c *= r[fl.tx]
+                b *= r
+            em.set_bias(l, c=c, b=b)
+
+    apply()
     res = em.run(**run_kw)
     for it in range(n_outer):
-        for l, m in models.items():
+        for l in libs:
             fl = em.libs[l]
-            m.mstep(fl.tx, fl.feat, em.position_counts(res.theta, l))
-            em.set_bias(l, c=base[l] * m.weights(fl.tx, fl.feat))
+            if l in trunc:
+                trunc[l].mstep(fl.tx, fl.feat, em.position_counts(res.theta, l))
+            if l in length:
+                ks = np.flatnonzero(em.pi[l] > 0)
+                mu = em.pi[l, ks] @ res.theta[ks]
+                length[l].mstep(res.expected_reads[l], mu * base_b[l])
+        apply()
         # floor so transcripts zeroed by the previous run's final round can return
         res = em.run(init_theta=np.maximum(res.theta, 1e-10), **run_kw)
         if verbose:
-            print(f"[truncation] outer {it + 1}: loglik={res.loglik[-1]:.6e} n_iter={res.n_iter}", flush=True)
+            print(f"[bias] outer {it + 1}: loglik={res.loglik[-1]:.6e} n_iter={res.n_iter}", flush=True)
     return res
+
+
+def fit_with_truncation(em, models, n_outer=10, run_kw=None, verbose=False):
+    """fit_bias with truncation models only (kept for existing callers)."""
+    return fit_bias(em, trunc=models, n_outer=n_outer, run_kw=run_kw, verbose=verbose)
