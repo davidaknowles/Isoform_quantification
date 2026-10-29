@@ -1,6 +1,6 @@
 """
 Quantify one SG-NEx replicate (cell line x replicate) from Illumina (salmon)
-and ONT direct RNA, direct cDNA and PCR-cDNA (minimap2), alone and jointly.
+and ONT direct cDNA and PCR-cDNA (minimap2), alone and jointly.
 
 Fits (one unit each, no prior):
   SR:nobias, SR:bias                       salmon ECs
@@ -27,7 +27,8 @@ from joli.lr_bias import LengthBias, TruncationModel, fit_bias
 from joli.paf import filter_alignments, library_from_alignments, read_fasta_lengths, read_paf
 from joli.salmon_io import library_from_salmon
 
-LR_PROTOCOLS = {"directRNA": "+", "directcDNA": None, "cDNA": None}
+# ONT direct RNA is left out: too low throughput to be a useful long-read input
+LR_PROTOCOLS = {"directcDNA": None, "cDNA": None}
 
 
 def main(cell, rep, sgnex_dir, out_dir):
