@@ -302,7 +302,7 @@ class StackedFeatures:
         return np.column_stack([m.features(start, end, tlen) for m in self.models])
 
 
-def fit_bias(em, trunc=None, length=None, n_outer=10, run_kw=None, verbose=False):
+def fit_bias(em, trunc=None, length=None, n_outer=10, run_kw=None, verbose=False, inner_max_iter=500):
     """
     Alternate JointEM runs (warm-started) with bias-model M-steps.
 
@@ -316,6 +316,7 @@ def fit_bias(em, trunc=None, length=None, n_outer=10, run_kw=None, verbose=False
                  the same model object share it (one pooled M-step).
         length : dict {library index: LengthBias}, shared in the same way.
         n_outer: number of outer iterations.
+        inner_max_iter : MM-step cap for the fits between bias updates (the final fit uses run_kw).
     Returns:
         JointResult of the final run; models are updated in place.
     """
@@ -339,8 +340,11 @@ def fit_bias(em, trunc=None, length=None, n_outer=10, run_kw=None, verbose=False
                 b *= r
             em.set_bias(l, c=c, b=b)
 
+    # intermediate fits only need to move theta towards the optimum for the next bias update;
+    # the final fit (after the last bias update) runs to convergence
+    inner_kw = dict(run_kw, max_iter=min(run_kw.get("max_iter", 5000), inner_max_iter))
     apply()
-    res = em.run(**run_kw)
+    res = em.run(**inner_kw)
     for it in range(n_outer):
         # one M-step per model object, pooling the libraries that share it
         for model, ls in _by_model(trunc).items():
@@ -355,7 +359,8 @@ def fit_bias(em, trunc=None, length=None, n_outer=10, run_kw=None, verbose=False
             model.mstep([res.expected_reads[l] for l in ls], mus)
         apply()
         # floor so transcripts zeroed by the previous run's final round can return
-        res = em.run(init_theta=np.maximum(res.theta, 1e-10), **run_kw)
+        kw = run_kw if it == n_outer - 1 else inner_kw
+        res = em.run(init_theta=np.maximum(res.theta, 1e-10), **kw)
         if verbose:
             print(f"[bias] outer {it + 1}: loglik={res.loglik[-1]:.6e} n_iter={res.n_iter}", flush=True)
     return res
