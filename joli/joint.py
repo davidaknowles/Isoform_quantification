@@ -106,6 +106,11 @@ class JointEM:
     """
     MM/EM for molar abundances shared across libraries.
 
+    Internally theta lives on the transcripts that appear in some library's
+    ECs (compact space, `cols`), with per-library compact indices `txc` and
+    rates `bc`; libraries keep global indices `tx` and rates `b` for bias
+    models. run() takes and returns full-length arrays.
+
     Args:
         libraries : list[Library]
         pi        : np.ndarray (L, K) | None -- library x unit molecule fractions;
@@ -126,7 +131,7 @@ class JointEM:
         self.backend, self.threads = backend, threads
         self.libs = [_FlatLibrary(l) for l in libraries]
         self.L = len(self.libs)
-        self.T = len(libraries[0].tcc.transcript_names)
+        self.T_full = len(libraries[0].tcc.transcript_names)
         self.transcript_names = libraries[0].tcc.transcript_names
         for l in libraries[1:]:
             if l.tcc.transcript_names != self.transcript_names:
@@ -140,67 +145,91 @@ class JointEM:
         self.pi = np.asarray(pi, dtype=np.float64)
         self.K = self.pi.shape[1]
         self.unit_names = unit_names or [f"unit{k}" for k in range(self.K)]
-        # transcripts that appear in a nonzero EC of some library of unit k
+        # compact transcript space: transcripts in a nonzero EC of some library
+        seen_any = np.zeros(self.T_full, dtype=bool)
+        for fl in self.libs:
+            seen_any[fl.tx] = True
+        self.cols = np.flatnonzero(seen_any)
+        self.T = len(self.cols)
+        remap = np.full(self.T_full, -1, dtype=np.int64)
+        remap[self.cols] = np.arange(self.T)
+        for fl in self.libs:
+            fl.txc = np.ascontiguousarray(remap[fl.tx])
+            fl.bc = np.ascontiguousarray(fl.b[self.cols])
+        # transcripts that appear in a nonzero EC of some library of unit k (compact)
         self.active = np.zeros((self.K, self.T), dtype=bool)
         for l, fl in enumerate(self.libs):
             seen = np.zeros(self.T, dtype=bool)
-            seen[fl.tx] = True
+            seen[fl.txc] = True
             self.active[self.pi[l] > 0] |= seen
+        self._activef = self.active.astype(np.float64)
+        self._Bmat = None                     # stacked compact rates (L, T), rebuilt after set_bias
+        self._G = np.empty((self.L, self.T))  # per-library gradients g_l (L, T)
+        self._N = np.array([fl.N for fl in self.libs])
 
-    def _library_estep(self, l, mu, threads):
-        """(g, sum_e n_e log denom_e) for library l at molar mixture mu."""
+    def _compact(self, x):
+        """Full-length (..., T_full) array to compact (..., T)."""
+        return np.asarray(x)[..., self.cols]
+
+    def _expand(self, x):
+        """Compact (..., T) array to full length (..., T_full), zeros elsewhere."""
+        out = np.zeros(x.shape[:-1] + (self.T_full,))
+        out[..., self.cols] = x
+        return out
+
+    def _library_estep(self, l, mu, threads, out=None):
+        """(g, sum_e n_e log denom_e) for library l at compact molar mixture mu; g written to out if given."""
         fl = self.libs[l]
         if self.backend == "rust":
             from . import native
             if threads > 1:
                 if getattr(fl, "gather", None) is None:
-                    fl.gather = native.gather_index(fl.tx, fl.ec, self.T)
+                    fl.gather = native.gather_index(fl.txc, fl.ec, self.T)
                 if getattr(fl, "c_sorted", None) is None:      # reset by set_bias
                     fl.c_sorted = np.ascontiguousarray(fl.c[fl.gather[1]])
-                return native.estep(fl.ec_ptr, fl.tx, fl.c, fl.counts, mu, threads, fl.gather, fl.c_sorted)
-            return native.estep(fl.ec_ptr, fl.tx, fl.c, fl.counts, mu, 1)
-        w = mu[fl.tx] * fl.c                                    # per position
+                return native.estep(fl.ec_ptr, fl.txc, fl.c, fl.counts, mu, threads, fl.gather, fl.c_sorted, out=out)
+            return native.estep(fl.ec_ptr, fl.txc, fl.c, fl.counts, mu, 1, out=out)
+        w = mu[fl.txc] * fl.c                                   # per position
         denom = np.bincount(fl.ec, weights=w, minlength=fl.n_ec)
         ok = denom > TOLERANCE
         ratio = np.where(ok, fl.counts / np.where(ok, denom, 1.0), 0.0)
         r_pos = fl.c * ratio[fl.ec]                             # n_e c_et / denom_e
-        g = np.bincount(fl.tx, weights=r_pos, minlength=self.T)  # sum_e n_e c_et / denom_e
+        g = np.bincount(fl.txc, weights=r_pos, minlength=self.T)  # sum_e n_e c_et / denom_e
+        if out is not None:
+            out[:] = g
+            g = out
         return g, float(fl.counts[ok] @ np.log(denom[ok]))
 
     def _estep(self, theta, expected_reads=False):
         """
-        Return Z (K, T), D (K, T), loglik, and expected reads per library (L, T)
-        if requested (else None). With the rust backend and several threads,
-        libraries run concurrently (ctypes releases the GIL); a single library
-        is split across threads only if it has >= 5M positions per thread.
+        For compact theta (K, T): Z (K, T), D (K, T), loglik, and expected reads
+        per library (L, T, compact) if requested (else None). With the rust
+        backend and several threads, libraries run concurrently (ctypes releases
+        the GIL); a single library is split across threads only from 5M
+        positions per thread. Accumulation over libraries uses two matrix products,
+        Z = theta * (pi^T G) and D = (pi * N / B)^T Bmat.
         """
-        Z = np.zeros((self.K, self.T))
-        D = np.zeros((self.K, self.T))
-        R = np.zeros((self.L, self.T)) if expected_reads else None
-        mus = [self.pi[l, self.pi[l] > 0] @ theta[self.pi[l] > 0] for l in range(self.L)]
+        if self._Bmat is None:
+            self._Bmat = np.stack([fl.bc for fl in self.libs])
+        mus = self.pi @ theta                                    # (L, T)
         threads = 1
         if self.backend == "rust":
             from . import native
             threads = self.threads or native.default_threads()
+        G = self._G
         if threads > 1 and self.L > 1 and sum(len(fl.tx) for fl in self.libs) >= 1_000_000:
             if getattr(self, "_pool", None) is None:
                 from concurrent.futures import ThreadPoolExecutor
                 self._pool = ThreadPoolExecutor(max_workers=threads)
-            out = list(self._pool.map(lambda l: self._library_estep(l, mus[l], 1), range(self.L)))
+            lls = list(self._pool.map(lambda l: self._library_estep(l, mus[l], 1, out=G[l])[1], range(self.L)))
         else:
-            out = [self._library_estep(l, mus[l], min(threads, max(1, len(fl.tx) // 5_000_000)))
+            lls = [self._library_estep(l, mus[l], min(threads, max(1, len(fl.tx) // 5_000_000)), out=G[l])[1]
                    for l, fl in enumerate(self.libs)]
-        loglik = 0.0
-        for l, fl in enumerate(self.libs):
-            g, ll = out[l]
-            mu = mus[l]
-            B = float(mu @ fl.b)
-            loglik += ll - fl.N * np.log(B)
-            if expected_reads:
-                R[l] = mu * g
-            for k in np.flatnonzero(self.pi[l] > 0):
-                Z[k] += self.pi[l, k] * theta[k] * g
-                D[k] += fl.N * self.pi[l, k] * fl.b / B
+        B = np.einsum("lt,lt->l", mus, self._Bmat)
+        loglik = float(np.sum(lls) - self._N @ np.log(B))
+        Z = theta * (self.pi.T @ G)
+        D = (self.pi * (self._N / B)[:, None]).T @ self._Bmat
+        R = mus * G if expected_reads else None
         return Z, D, loglik, R
 
     def position_counts(self, theta, l):
@@ -208,39 +237,45 @@ class JointEM:
         Expected reads per (EC, transcript) position of library l,
         z_lp = n_e mu_t c_et / sum_{t' in e} mu_t' c_et', as a flat array
         aligned with the library's flat EC layout (for M-steps of bias models).
+        theta is full length (K, T_full), as returned by run().
         """
         fl = self.libs[l]
-        ks = np.flatnonzero(self.pi[l] > 0)
-        mu = self.pi[l, ks] @ theta[ks]
+        mu = self.pi[l] @ self._compact(theta)
         if self.backend == "rust":
             from . import native
-            return native.position_counts(fl.ec_ptr, fl.tx, fl.c, fl.counts, mu,
+            return native.position_counts(fl.ec_ptr, fl.txc, fl.c, fl.counts, mu,
                                           min(self.threads or native.default_threads(), max(1, len(fl.tx) // 1_000_000)))
-        w = mu[fl.tx] * fl.c
+        w = mu[fl.txc] * fl.c
         denom = np.bincount(fl.ec, weights=w, minlength=fl.n_ec)
         return np.where(denom[fl.ec] > TOLERANCE, fl.counts[fl.ec] * w / np.maximum(denom[fl.ec], TOLERANCE), 0.0)
 
     def set_bias(self, l, c=None, b=None):
-        """Replace library l's flat compatibility weights c (aligned with its flat layout) and/or rates b."""
+        """Replace library l's flat compatibility weights c (aligned with its flat layout) and/or full-length rates b."""
         if c is not None:
             self.libs[l].c = np.ascontiguousarray(c, dtype=np.float64)
             self.libs[l].c_sorted = None
         if b is not None:
             self.libs[l].b = np.ascontiguousarray(b, dtype=np.float64)
+            self.libs[l].bc = np.ascontiguousarray(self.libs[l].b[self.cols])
+            self._Bmat = None
 
     def _update(self, theta, a):
-        """One MM step. Returns (new theta, log posterior at the input theta)."""
+        """One MM step on compact theta. Returns (new theta, log posterior at the input theta)."""
         Z, D, ll, _ = self._estep(theta)
         if a is None:
             num = Z
         else:
-            num = Z + a
-            ll += float((a[theta > 0] * np.log(theta[theta > 0])).sum())
-        num = np.where(self.active, num, 0.0)
-        # lambda_k from sum_t theta_kt = 1 at the fixed point: sum(num) - sum(theta_old * D)
-        lam = num.sum(axis=1, keepdims=True) - (theta * D).sum(axis=1, keepdims=True)
-        new = np.where(self.active, num / np.maximum(D + lam, TOLERANCE), 0.0)
-        return new / new.sum(axis=1, keepdims=True), ll
+            num = Z + a                                        # a is zero off the active set
+            pos = theta > 0
+            ll += float((a[pos] * np.log(theta[pos])).sum())
+        # lambda_k from sum_t theta_kt = 1 at the fixed point: sum(num) - sum(theta_old * D);
+        # inactive entries have num = 0 (theta = 0 there and a masked), so stay 0
+        lam = num.sum(axis=1, keepdims=True) - np.einsum("kt,kt->k", theta, D)[:, None]
+        D += lam
+        np.maximum(D, TOLERANCE, out=D)
+        new = np.divide(num, D, out=num if a is None else None)
+        new /= new.sum(axis=1, keepdims=True)
+        return new, ll
 
     def run(self, prior=None, init_theta=None, max_iter=5000, min_iter=20,
             rel_tol=1e-2, theta_floor=1e-8, accelerate=True, zero_below=0.01,
@@ -261,16 +296,19 @@ class JointEM:
         stay at small positive values whose number depends on the iteration count.
 
         Args:
-            prior      : np.ndarray (T,) or (K, T) | None -- Dirichlet pseudo-counts a.
-            init_theta : np.ndarray (K, T) | None -- warm start; uniform over active otherwise.
+            prior      : np.ndarray (T,) or (K, T) | None -- Dirichlet pseudo-counts a (full length).
+            init_theta : np.ndarray (K, T) | None -- warm start (full length); uniform over active otherwise.
             zero_below : float | None -- expected-read threshold for final zeroing.
         """
         if init_theta is None:
-            theta = self.active / self.active.sum(axis=1, keepdims=True)
+            theta = self._activef / self._activef.sum(axis=1, keepdims=True)
         else:
-            theta = np.where(self.active, init_theta, 0.0)
+            theta = self._compact(init_theta) * self._activef
             theta = theta / theta.sum(axis=1, keepdims=True)
-        a = None if prior is None else np.broadcast_to(np.asarray(prior, dtype=np.float64), (self.K, self.T))
+        a = None
+        if prior is not None:
+            a = np.broadcast_to(np.asarray(prior, dtype=np.float64), (self.K, self.T_full))
+            a = self._compact(a) * self._activef
         history = []
         converged = False
         n_steps = 0
@@ -282,20 +320,26 @@ class JointEM:
             new = t2
             if accelerate:
                 r = t1 - theta
-                v = t2 - t1 - r
-                nv = np.sqrt((v * v).sum())
+                v = t2 - t1
+                v -= r
+                nv = np.sqrt(np.einsum("kt,kt->", v, v))
                 if nv > 0:
-                    step = min(-np.sqrt((r * r).sum()) / nv, -1.0)
-                    tp = theta - 2.0 * step * r + step * step * v
-                    tp = np.where(self.active, np.maximum(tp, 1e-16), 0.0)
+                    step = min(-np.sqrt(np.einsum("kt,kt->", r, r)) / nv, -1.0)
+                    tp = r
+                    tp *= -2.0 * step
+                    tp += theta
+                    v *= step * step
+                    tp += v
+                    np.maximum(tp, 1e-16, out=tp)
+                    tp *= self._activef
                     tp /= tp.sum(axis=1, keepdims=True)
                     t3, llp = self._update(tp, a)
                     n_steps += 1
                     if llp >= ll1:
                         new = t3
             history.append(ll0)
-            mon = new > theta_floor
-            changed = int((mon & (np.abs(new - theta) > rel_tol * new)).sum())
+            diff = np.abs(new - theta)
+            changed = int(np.count_nonzero((new > theta_floor) & (diff > rel_tol * new)))
             theta = new
             it += 1
             if verbose and (it <= 3 or it % 50 == 0):
@@ -311,7 +355,8 @@ class JointEM:
             n_steps += 1
         _, _, ll, R = self._estep(theta, expected_reads=True)
         history.append(ll)
-        return JointResult(theta=theta, n_iter=n_steps, converged=converged, loglik=history, expected_reads=R)
+        return JointResult(theta=self._expand(theta), n_iter=n_steps, converged=converged, loglik=history,
+                           expected_reads=self._expand(R))
 
 
 def library_from_tcc(name, tcc, platform, eff_lens=None) -> Library:

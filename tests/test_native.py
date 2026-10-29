@@ -30,7 +30,7 @@ def test_rust_matches_numpy():
             if backend == "numpy":
                 fits["theta0"] = theta
             Z, D, ll, R = em._estep(theta)
-            z = em.position_counts(theta, 1)
+            z = em.position_counts(em._expand(theta), 1)
             fits[(backend, threads)] = (Z, ll, z, em.run(max_iter=200).theta)
     ref = fits[("numpy", None)]
     for key in [("rust", 1), ("rust", 4)]:
@@ -49,13 +49,13 @@ def test_multithreaded_kernels_match_numpy():
     theta = rng.dirichlet(np.ones(em.T))[None, :]
     mu = theta[0]
     g0, ll0 = em._library_estep(0, mu, 1)
-    index = native.gather_index(fl.tx, fl.ec, em.T)
+    index = native.gather_index(fl.txc, fl.ec, em.T)
     for threads in [1, 4]:
-        g1, ll1 = native.estep(fl.ec_ptr, fl.tx, fl.c, fl.counts, mu, threads, index, np.ascontiguousarray(fl.c[index[1]]))
+        g1, ll1 = native.estep(fl.ec_ptr, fl.txc, fl.c, fl.counts, mu, threads, index, np.ascontiguousarray(fl.c[index[1]]))
         np.testing.assert_allclose(g1, g0, rtol=1e-10, atol=1e-12)
         np.testing.assert_allclose(ll1, ll0, rtol=1e-12)
-        z = native.position_counts(fl.ec_ptr, fl.tx, fl.c, fl.counts, mu, threads)
-        np.testing.assert_allclose(z, em.position_counts(theta, 0), rtol=1e-10, atol=1e-12)
+        z = native.position_counts(fl.ec_ptr, fl.txc, fl.c, fl.counts, mu, threads)
+        np.testing.assert_allclose(z, em.position_counts(em._expand(theta), 0), rtol=1e-10, atol=1e-12)
 
 
 def test_library_parallel_estep_matches_numpy():
@@ -67,3 +67,18 @@ def test_library_parallel_estep_matches_numpy():
     np.testing.assert_allclose(Z1, Z0, rtol=1e-10, atol=1e-12)
     np.testing.assert_allclose(D1, D0, rtol=1e-12)
     np.testing.assert_allclose(ll1, ll0, rtol=1e-12)
+
+
+def test_compact_space_with_unobserved_transcripts():
+    """Transcripts never observed are dropped internally and returned as zeros."""
+    rng = np.random.default_rng(3)
+    lib = random_library(rng, T=500, E=200)                # many of the 500 transcripts unobserved
+    em = JointEM([lib], backend="numpy")
+    assert em.T < em.T_full
+    res = em.run()
+    assert res.theta.shape == (1, 500)
+    unseen = np.setdiff1d(np.arange(500), np.concatenate(lib.tcc.ec_transcripts))
+    assert np.all(res.theta[0, unseen] == 0) and abs(res.theta.sum() - 1) < 1e-12
+    if native.available():
+        res2 = JointEM([lib], backend="rust", threads=1).run()
+        np.testing.assert_allclose(res2.theta, res.theta, rtol=1e-8, atol=1e-14)
