@@ -4,15 +4,19 @@ Joint Parse short-read + Kinnex Parse long-read quantification by cell type.
 Units are CellTypist cell types (Immune_All_Low, the vocabulary of both the
 short-read recipes and the long-read labels). Libraries:
   SR  one per (series, subject, cell type, primer): Parse short-read pseudobulks
-      (salmon/alevin-fry RAD positions), poly(dT) rate b = 1, hexamer b = L - r + 1
-  LR  one per (cell type, primer): Kinnex Parse long-read pseudobulks, b = 1
+      (salmon/alevin-fry RAD positions)
+  LR  one per (cell type, primer): Kinnex Parse long-read pseudobulks
+Base rates (alevin.primer_rates): poly(dT) 1 on spliced targets and L - r + 1 on
+unspliced targets (internal priming), random hexamer L - r + 1 (r = 150 for SR, 0 for LR).
 Each library belongs to the unit of its cell type. The short- and long-read
 donors differ, so a unit's abundances are shared across donors and platforms.
 
 Bias models are shared per platform x primer across all of its libraries:
   SR position profile (poly(dT): distance to 3' end; hexamer: relative position)
   LR read-end truncation (5' and 3' uncovered bases)
-  LR length bias (identifiable against SR poly(dT), whose rate is fixed at 1)
+  LR length bias with a separate unspliced scale (identifiable against SR, whose
+  spliced rates are fixed)
+  SR poly(dT) scale of internal priming on unspliced targets
 
 Fits: SR_plain, SR, LR_plain, LR, joint_plain, joint (all bias models).
 Outputs: tpm.tsv.gz (transcripts x fit|unit), fits.tsv, bias.tsv, and
@@ -30,6 +34,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from joli.alevin import primer_rates
 from joli.evaluate import concordance_metrics, read_t2g
 from joli.joint import JointEM, molar_to_tpm
 from joli.lr_bias import (FeatureColumns, LengthBias, ReadPositionModel, StackedFeatures,
@@ -89,7 +94,7 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
     out_dir.mkdir(parents=True, exist_ok=True)
     names, tx_len = read_fasta_lengths(ref_dir / "spliceu.fa")
     t2g = read_t2g(ref_dir / "t2g.tsv")
-    span = np.maximum(tx_len - SR_READ_LEN, 0) + 1.0
+    unspliced = np.array([n.endswith("-U") for n in names])
 
     sr_aln, sr_groups = load_sr(sr_dirs.split(","), names, float(sr_fraction))
     lr_aln, lr_groups = load_lr(kdir, float(lr_fraction))
@@ -106,7 +111,9 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
 
     sr_feat = StackedFeatures([ReadPositionModel(tx_len, SR_READ_LEN, "3p"),
                                ReadPositionModel(tx_len, SR_READ_LEN, "relative")])
-    rate = lambda g: span if "|SR|random hexamer|" in g else np.ones(len(names))
+    def rate(g):
+        plat, primer = g.split("|")[1:3]
+        return primer_rates(primer, tx_len, SR_READ_LEN if plat == "SR" else 0, unspliced)
     keep_g = lambda gs: {g: rate(g) for g in set(x for x in gs if x is not None) if g.split("|")[0] in unit_idx}
     sr_aln = sr_aln[pd.Series(sr_groups[sr_aln["cell"].to_numpy()]).isin(keep_g(sr_groups)).to_numpy()]
     lr_aln = lr_aln[pd.Series(lr_groups[lr_aln["cell"].to_numpy()]).isin(keep_g(lr_groups)).to_numpy()]
@@ -116,7 +123,7 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
     del sr_aln, lr_aln
     print(f"{len(sr_libs)} SR and {len(lr_libs)} LR libraries", flush=True)
 
-    def setup(lib_dict, use_models, sr_models, lr_models, lr_length):
+    def setup(lib_dict, use_models, sr_models, lr_models, lr_length, sr_kappa):
         keys = sorted(lib_dict)
         libs = [lib_dict[k] for k in keys]
         unit_of = [unit_idx[k.split("|")[0]] for k in keys]
@@ -126,6 +133,8 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
                 plat, primer = k.split("|")[1:3]
                 if plat == "SR":
                     trunc[i] = sr_models[primer]
+                    if sr_kappa is not None and primer == "poly(dT)":
+                        length[i] = sr_kappa
                 else:
                     trunc[i] = lr_models[primer]
                     if lr_length is not None:
@@ -142,8 +151,11 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
         sr_models = {"poly(dT)": FeatureColumns(ReadPositionModel(tx_len, SR_READ_LEN, "3p"), [0]),
                      "random hexamer": FeatureColumns(ReadPositionModel(tx_len, SR_READ_LEN, "relative"), [1])}
         lr_models = {p: TruncationModel(tx_len) for p in PRIMERS}
-        lr_length = {p: LengthBias(tx_len) for p in PRIMERS} if use_length else None
-        keys, libs, unit_of, trunc, length = setup(lib_dict, use_models, sr_models, lr_models, lr_length)
+        # LR: smooth length bias plus a separate scale for unspliced targets; SR poly(dT): the
+        # scale of internal priming on unspliced targets (SR hexamer and SR poly(dT) spliced rates fixed)
+        lr_length = {p: LengthBias(tx_len, extra=unspliced[:, None]) for p in PRIMERS} if use_length else None
+        sr_kappa = LengthBias(tx_len, extra=unspliced[:, None], length_terms=False, ridge=1e-3) if use_length else None
+        keys, libs, unit_of, trunc, length = setup(lib_dict, use_models, sr_models, lr_models, lr_length, sr_kappa)
         present = sorted(set(unit_of))                    # units covered by this fit's libraries
         local = {k: i for i, k in enumerate(present)}
         pi = np.zeros((len(libs), len(present)))
@@ -162,6 +174,7 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
                 grid = np.array([300, 500, 1000, 2000, 4000, 8000, 16000])
                 bias.append(pd.DataFrame({"fit": fit, "model": f"LR length {p}", "x": grid, "value": m.rates_at(grid)}))
         summary.append({"fit": fit, "n_libraries": len(libs), "units": len(present), "loglik": res.loglik[-1],
+                        "sr_log_kappa_unspliced": float(sr_kappa.w[0]) if sr_kappa is not None else np.nan,
                         "n_iter": res.n_iter, "seconds": round(time.time() - t0, 1)})
         print(summary[-1], flush=True)
 

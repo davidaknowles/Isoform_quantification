@@ -124,3 +124,31 @@ def test_shared_models_pool_across_units():
     for u, th in enumerate([th0, th1]):
         assert np.abs(res.theta[u] - th).sum() < 0.15
     assert model.end3.p[0] > 0.95
+
+
+def test_unspliced_internal_priming_scale_recovered():
+    """poly(dT): rate 1 on spliced targets, kappa * L on unspliced; hexamer: L everywhere."""
+    from joli.alevin import primer_rates
+    from joli.joint import Library
+    from joli.load_tcc import TCCData
+    from joli.lr_bias import LengthBias, fit_bias
+    rng = np.random.default_rng(7)
+    T = 600
+    L = rng.integers(500, 50000, size=T).astype(float)
+    unspliced = np.arange(T) >= 400
+    theta = rng.dirichlet(np.ones(T))
+    kappa = 0.01
+    true_rates = {"poly(dT)": np.where(unspliced, kappa * L, 1.0), "random hexamer": L}
+    libs = []
+    for p in ["poly(dT)", "random hexamer"]:
+        pr = theta * true_rates[p]
+        n = rng.multinomial(300000, pr / pr.sum()).astype(float)
+        tcc = TCCData(ec_counts=n, ec_transcripts=[np.array([t]) for t in range(T)],
+                      transcript_names=[f"t{t}" for t in range(T)], total_reads=int(n.sum()), n_targets=T, sample_dir="")
+        libs.append(Library(p, tcc, b=primer_rates(p, L, 0, unspliced)))
+    lb = LengthBias(L, extra=unspliced[:, None], length_terms=False, ridge=1e-3)
+    res = fit_bias(JointEM(libs, units=[0, 0]), length={0: lb}, n_outer=10)
+    r = lb.rates()
+    est = r[unspliced].mean() / r[~unspliced].mean()        # learned multiplier on the base rate L
+    assert abs(np.log(est) - np.log(kappa * L[unspliced].mean() / (L[unspliced] + 1).mean())) < 0.1, est
+    np.testing.assert_allclose(res.theta[0], theta, atol=5e-3)

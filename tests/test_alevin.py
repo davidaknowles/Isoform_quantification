@@ -34,7 +34,9 @@ def test_pseudobulk_pools_ecs_across_libraries(tmp_path):
     tot = {k: counts[groups.index[groups.primer == "poly(dT)"][0], e] for e, k in enumerate(ec_keys)}
     assert tot[("t1",)] == 3 + 5 and tot[("t1", "t2")] == 1 + 4
     assert groups.set_index("primer").loc["poly(dT)", "n_cells"] == 2
-    eff = np.array([100.0, 200.0, 1000.0])
-    lib = library_from_pseudobulk("x", ec_keys, counts[0], features, primer_rates("poly(dT)", eff))
+    lens = np.array([100.0, 200.0, 1000.0])
+    unspliced = np.array([False, False, True])
+    lib = library_from_pseudobulk("x", ec_keys, counts[0], features, primer_rates("poly(dT)", lens, 0, unspliced))
     assert lib.tcc.ec_counts.sum() == counts[0].sum()
-    np.testing.assert_array_equal(primer_rates("random hexamer", eff), eff)
+    np.testing.assert_array_equal(primer_rates("poly(dT)", lens, 0, unspliced), [1.0, 1.0, 1001.0])
+    np.testing.assert_array_equal(primer_rates("random hexamer", lens, 50), [51.0, 151.0, 951.0])

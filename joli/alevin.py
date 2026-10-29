@@ -113,10 +113,28 @@ def library_from_pseudobulk(name, ec_keys, counts, transcript_names, b, platform
     return Library(name=name, tcc=tcc, b=np.asarray(b, dtype=np.float64), platform=platform)
 
 
-def primer_rates(primer, eff_len):
-    """Sampling rate per transcript for a Parse RT primer: 1 for poly(dT), effective length for random hexamer."""
+def primer_rates(primer, tx_len, read_len=150, unspliced=None):
+    """
+    Base sampling rate per target for a Parse RT primer.
+
+    poly(dT) primes once per molecule at the poly(A) tail (rate 1), except on
+    unspliced targets, whose reads come from internal priming at A-rich
+    stretches along the gene body at a rate proportional to the number of
+    read starts, L - r + 1. Random hexamers prime along the molecule: L - r + 1
+    for every target. The scale of poly(dT) internal priming relative to 3'
+    priming is left to a learned covariate (LengthBias with an unspliced
+    indicator). For long reads, read_len = 0.
+
+    Args:
+        tx_len    : (T,) target lengths.
+        unspliced : (T,) bool | None -- unspliced (gene-span) targets.
+    """
+    span = np.maximum(np.asarray(tx_len, dtype=np.float64) - read_len, 0.0) + 1.0
     if primer == "poly(dT)":
-        return np.ones_like(eff_len, dtype=np.float64)
+        b = np.ones_like(span)
+        if unspliced is not None:
+            b[np.asarray(unspliced, dtype=bool)] = span[np.asarray(unspliced, dtype=bool)]
+        return b
     if primer == "random hexamer":
-        return np.asarray(eff_len, dtype=np.float64)
+        return span
     raise ValueError(f"unknown primer {primer}")

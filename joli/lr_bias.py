@@ -176,21 +176,33 @@ class ReadPositionModel:
 
 class LengthBias:
     """
-    Library-specific sampling rate as a smooth function of transcript length,
-    b_t = exp(x_t . w), with x_t (P,) a piecewise-linear basis in log length
-    (log L and hinges at the knots). It multiplies the library's base rates
-    (1 for long reads, effective length for short reads). A read of transcript
-    t then has P(r, t) proportional to mu_t b_t q(r | t), so b also multiplies c.
+    Library-specific sampling rate b_t = exp(x_t . w) multiplying the
+    library's base rates, with x_t (P,) a piecewise-linear basis in log length
+    (log L and hinges at the knots) and optional extra covariates, e.g. an
+    indicator of unspliced targets whose rate scale differs (internal priming
+    under poly(dT)). A read of transcript t has P(r, t) proportional to
+    mu_t b_t q(r | t), so b also multiplies c. Columns are centred, so w = 0
+    leaves the base rates unchanged up to a constant.
 
     b is confounded with theta unless theta is shared with another library
     whose rates are fixed (e.g. SR with effective lengths, or a reference LR
     protocol). The M-step maximises sum_t Z_t log b_t - N log sum_t mu_t b_t
     (concave in w) by Newton steps with a ridge penalty.
+
+    Args:
+        tx_len       : (T,) transcript lengths.
+        knots        : hinge positions of the log-length basis.
+        extra        : (T, P2) | None -- extra covariates appended to the basis.
+        length_terms : bool -- include the log-length basis.
     """
 
-    def __init__(self, tx_len, knots=(500, 1000, 2000, 4000, 8000), ridge=1.0):
+    def __init__(self, tx_len, knots=(500, 1000, 2000, 4000, 8000), ridge=1.0, extra=None, length_terms=True):
         self.knots = tuple(knots)
-        X = self._basis(tx_len)
+        self.length_terms = length_terms
+        cols = [self._basis(tx_len)] if length_terms else []
+        if extra is not None:
+            cols.append(np.asarray(extra, dtype=np.float64).reshape(len(tx_len), -1))
+        X = np.column_stack(cols)
         self.center = X.mean(axis=0)
         self.X = X - self.center
         self.w = np.zeros(self.X.shape[1])
@@ -204,33 +216,59 @@ class LengthBias:
         return np.exp(self.X @ self.w)
 
     def rates_at(self, lengths):
-        """b at arbitrary lengths, on the same scale as rates()."""
-        return np.exp((self._basis(lengths) - self.center) @ self.w)
+        """b at arbitrary lengths from the length terms (extra covariates at their mean)."""
+        if not self.length_terms:
+            raise ValueError("no length terms")
+        P = self._basis(lengths).shape[1]
+        return np.exp((self._basis(lengths) - self.center[:P]) @ self.w[:P])
 
-    def mstep(self, Z, mu, n_newton=20):
+    def mstep(self, Z, mu, n_newton=30):
         """
         Z (T,) expected reads per transcript and mu (T,) molar mixture of one
         library, or lists of them for libraries sharing this length bias: the
-        objective is then sum_l [Z_l . log b - N_l log sum_t mu_lt b_t].
+        objective is sum_l [Z_l . log b - N_l log sum_t mu_lt b_t] - ridge |w|^2 / 2.
+        Newton steps with backtracking (the Hessian can be nearly singular when
+        mu is concentrated on a few targets).
         """
         Zs = Z if isinstance(Z, (list, tuple)) else [Z]
         mus = mu if isinstance(mu, (list, tuple)) else [mu]
         Ns = [z.sum() for z in Zs]
         XZ = sum(self.X.T @ z for z in Zs)
+        logmus = [np.log(np.maximum(m_, 1e-300)) for m_ in mus]
         P = len(self.w)
+
+        def objective(w):
+            eta = self.X @ w
+            f = XZ @ w - 0.5 * self.ridge * w @ w
+            for N, lm in zip(Ns, logmus):
+                a = lm + eta
+                amax = a.max()
+                f -= N * (amax + np.log(np.exp(a - amax).sum()))
+            return f
+
+        f = objective(self.w)
         for _ in range(n_newton):
-            r = self.rates()
+            eta = self.X @ self.w
             grad = XZ - self.ridge * self.w
             H = self.ridge * np.eye(P)
-            for N, m_ in zip(Ns, mus):
-                pb = m_ * r
-                p = pb / pb.sum()
+            for N, lm in zip(Ns, logmus):
+                a = lm + eta
+                p = np.exp(a - a.max())
+                p /= p.sum()
                 m = self.X.T @ p
                 grad -= N * m
                 H += N * ((self.X * p[:, None]).T @ self.X - np.outer(m, m))
             step = np.linalg.solve(H, grad)
-            self.w += step
-            if np.abs(step).max() < 1e-8:
+            t = 1.0
+            while True:
+                w_new = self.w + t * step
+                f_new = objective(w_new)
+                if f_new >= f - 1e-12 * abs(f) or t < 1e-8:
+                    break
+                t *= 0.5
+            done = np.abs(w_new - self.w).max() < 1e-8
+            self.w, f = w_new, f_new
+            if done:
                 break
 
 
