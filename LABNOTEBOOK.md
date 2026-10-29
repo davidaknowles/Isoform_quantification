@@ -114,6 +114,29 @@ The WTC11 LR libraries carry Lexogen SIRV Set 4: 69 SIRV isoforms in 7 genes (mi
 
 On spike-ins with known molarity, best-score ties beat the 0.95 threshold on every platform, and the truncation model improves every platform (for ONT the spread of log abundances drops from 1.22 to 0.40). Long SIRVs are over-sampled 2× by PacBio poly(A), under-sampled 30× by CapTrap and 5× by ONT direct RNA, so length-dependent sampling is large and platform specific. A per-library length bias $b_t = \exp(x_t^\top w)$ (`LengthBias` in `joli/lr_bias.py`, piecewise-linear in $\log L_t$) is identifiable only when $\theta$ is shared with a library whose rates are fixed, e.g. poly(A) SR with effective lengths, or several LR protocols on one RNA sample. PacBio remains far from the truth even with truncation (TV 0.32), possibly from PCR and size selection in library prep.
 
+### 2026-10-29 SG-NEx spike-ins: SR, three ONT protocols, joint fits
+
+SG-NEx H9 (SIRV Set 4: equimolar isoforms and long SIRVs) and HEYA8 (sequins Mix A v2 and SIRV Set 1 mix E2, isoforms at known unequal ratios), three replicates each, poly(A) Illumina PE150 (salmon) and ONT direct RNA, direct cDNA and PCR-cDNA (minimap2, best-score ties). Scored with `analyses/sgnex/spikein_eval.py` (means over replicates; gene TV median of isoform fractions against truth, and Pearson / SD of log abundance ratio across the mix's transcripts; SIRV-4 truth is constant, so its Pearson is undefined):
+
+| fit | SIRV-4 TV | SIRV-4 SD log | sequins TV | sequins log-Pearson | SIRV E2 TV | SIRV E2 log-Pearson |
+|---|---|---|---|---|---|---|
+| SR | 0.260 | 1.80 | 0.133 | 0.900 | 0.246 | 0.832 |
+| SR, salmon bias correction | 0.253 | 1.83 | 0.122 | 0.894 | 0.293 | 0.825 |
+| dRNA | 0.113 | 1.97 | 0.240 | 0.699 | 0.118 | 0.664 |
+| dRNA + trunc | **0.100** | 1.72 | 0.243 | 0.690 | **0.076** | **0.857** |
+| SR + dRNA + trunc | 0.217 | 1.78 | 0.115 | 0.896 | 0.219 | 0.838 |
+| dcDNA | 0.235 | 2.12 | 0.074 | 0.947 | 0.245 | 0.579 |
+| dcDNA + trunc | 0.170 | **1.44** | 0.077 | **0.948** | 0.186 | 0.837 |
+| SR + dcDNA + trunc | 0.136 | 1.61 | 0.099 | 0.910 | 0.215 | 0.855 |
+| PCR-cDNA | 0.363 | 2.23 | 0.120 | 0.939 | 0.254 | 0.564 |
+| PCR-cDNA + trunc | 0.263 | 1.62 | 0.123 | 0.938 | 0.249 | 0.777 |
+| SR + PCR-cDNA + trunc | 0.134 | 1.57 | **0.070** | 0.914 | 0.143 | 0.856 |
+| SR + all LR + trunc + length | 0.175 | 1.59 | 0.101 | 0.919 | 0.206 | 0.851 |
+
+(dRNA detects few sequins: 120 of 164 at zero, so its sequin columns reflect depth.) Adding a length-bias term to an SR + LR fit makes every mix worse (e.g. SIRV-4 TV with dcDNA 0.136 → 0.215).
+
+Findings. (1) The truncation model improves every ONT protocol on SIRVs, most in abundance (SIRV E2 log-Pearson 0.66 → 0.86 dRNA, 0.58 → 0.84 dcDNA, 0.56 → 0.78 PCR-cDNA), replicating the WTC11 SIRV result. (2) Joint SR + LR beats both inputs for the PCR-cDNA protocol on SIRV-4 and sequins and is better than SR alone throughout, but with direct RNA (the most accurate LR here) adding SR makes isoform fractions much worse (SIRV E2 TV 0.076 → 0.219): SR has tens of times more reads and its own isoform-level bias dominates the joint likelihood. (3) The length-bias term, with SR as the fixed reference, pulls LR towards SR's own biases. The next modelling steps are an SR bias model that is not taken as truth (e.g. SR positional/fragment model fitted jointly, or tempering SR's likelihood by an estimated weight) and treating no platform as the fixed length reference.
+
 ### 2026-10-28 Parse single-cell processing with salmon/alevin-fry
 
 Parse short reads go through a patched salmon 1.10.3 (`salmon alevin --splitseqV2 --rad`, patch from tealeaf) whose RAD records carry, per alignment, the score, start, end and transcript length, then a patched alevin-fry 0.16 that parses those records and dumps transcript-level ECs (t2t map) with per-UMI probability vectors. Read positions are therefore kept for a primer-specific positional model. Cells come from tealeaf's per-series recipes: each 24-nt barcode (bc3+bc2+bc1, salmon's `--splitseqV2` order) is tagged with subject, cell type and RT primer, and alevin-fry's permit list is restricted to those barcodes (`--valid-bc`). The poly(dT) and random-hexamer halves of a cell stay separate barcodes.
