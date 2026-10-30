@@ -1,29 +1,29 @@
 """
-Joint Parse short-read + Kinnex Parse long-read quantification by cell type.
+Joint Parse short-read + single-cell long-read quantification by cell type.
 
 Units are CellTypist cell types (Immune_All_Low, the vocabulary of both the
 short-read recipes and the long-read labels). Libraries:
   SR  one per (series, subject, cell type, primer): Parse short-read pseudobulks
       (salmon/alevin-fry RAD positions)
-  LR  one per (cell type, primer): Kinnex Parse long-read pseudobulks
+  LR  one per (cell type, kit, source library) from each long-read directory:
+      Kinnex Parse (kit = RT primer) and/or Kinnex 10x 3'/5' (kit = poly(dT)@3p / @5p)
 Base rates (alevin.primer_rates): poly(dT) 1 on spliced targets and L - r + 1 on
 unspliced targets (internal priming), random hexamer L - r + 1 (r = 150 for SR, 0 for LR).
-Each library belongs to the unit of its cell type. The short- and long-read
-donors differ, so a unit's abundances are shared across donors and platforms.
+Each library belongs to the unit of its cell type. Short- and long-read donors
+differ, so a unit's abundances are shared across donors and platforms: short
+reads bring coverage, long reads bring isoform identifiability.
 
-Bias models are shared per platform x primer across all of its libraries:
+Bias models are shared per platform x primer/kit across all of its libraries:
   SR position profile (poly(dT): distance to 3' end; hexamer: relative position)
-  LR read-end truncation (5' and 3' uncovered bases)
-  LR length bias with a separate unspliced scale (identifiable against SR, whose
-  spliced rates are fixed)
+  LR read-end truncation (5' and 3' uncovered bases), per kit
+  LR length bias with a separate unspliced scale, per kit (identifiable against
+  SR, whose spliced rates are fixed)
   SR poly(dT) scale of internal priming on unspliced targets
 
-Fits: SR_plain, SR, LR_plain, LR, joint_plain, joint (all bias models).
-Outputs: tpm.tsv.gz (transcripts x fit|unit), fits.tsv, bias.tsv, and
-concordance.tsv (per cell type: SR-only vs LR-only isoform fractions on
-spliced transcripts, without and with bias models).
+Fits: LR (long reads alone, with truncation; baseline), joint_plain, joint (all bias models).
+Outputs: tpm.tsv.gz (transcripts x fit|unit), fits.tsv, bias.tsv.
 
-Run: python analyses/parse/joint_celltype.py <sr_series_dirs,comma-separated> <kinnex_dir> <ref_dir> <out_dir>
+Run: python analyses/parse/joint_celltype.py <sr_series_dirs,comma-separated> <lr_dirs,comma-separated> <ref_dir> <out_dir>
                                              [sr_fraction] [lr_fraction] [min_cells]
 """
 
@@ -35,7 +35,6 @@ import numpy as np
 import pandas as pd
 
 from joli.alevin import primer_rates
-from joli.evaluate import concordance_metrics, read_t2g
 from joli.joint import JointEM, molar_to_tpm
 from joli.lr_bias import (FeatureColumns, LengthBias, ReadPositionModel, StackedFeatures,
                           TruncationModel, fit_bias)
@@ -69,39 +68,61 @@ def load_sr(series_dirs, names, fraction):
     return pd.concat(parts, ignore_index=True), np.array(groups, dtype=object)
 
 
-def load_lr(kdir, fraction, seed=0):
-    """Long-read molecules; cell index = 2 * cell + primer half."""
-    kdir = Path(kdir)
-    z = np.load(kdir / "molecules" / "alignments.npz")
-    mol = z["mol"]
-    keep = np.random.default_rng(seed).random(int(mol.max()) + 1) < fraction
-    sel = keep[mol]
-    aln = pd.DataFrame({"read": mol[sel], "cell": 2 * z["cell"][sel].astype(np.int64) + z["half"][sel],
-                        "tx_idx": z["tx_idx"][sel], "start": z["tstart"][sel], "end": z["tend"][sel],
-                        "tlen": z["tlen"][sel]})
-    cell_names = (kdir / "molecules" / "cells.txt").read_text().split()
-    ct = pd.read_csv(kdir / "celltypist.tsv", sep="\t").set_index("cell")["cell_type"]
-    types = ct.reindex(cell_names).to_numpy(dtype=object)
-    groups = np.array([f"{t}|LR|{p}" if isinstance(t, str) else None for t in types for p in PRIMERS],
-                      dtype=object)
+def load_lr(kdirs, fraction, seed=0):
+    """
+    Long-read molecules of one or more processed long-read directories
+    (molecules/alignments.npz, molecules/cells.txt, celltypist.tsv, cells.tsv).
+
+    Each (cell, primer half) gets a group label "<cell type>|LR|<kit>|<dir>:<library>".
+    The kit names the read-end/length behaviour: the Parse RT primer for Kinnex
+    Parse (two halves per cell), or "poly(dT)@3p" / "poly(dT)@5p" for 10x 3'/5'
+    (cells.tsv has kit and library columns; one half per cell).
+    Returns (alignments with global cell index, groups per cell-half, cell type per cell).
+    """
+    parts, groups, types_all, mol_off, cell_off = [], [], [], 0, 0
+    for kdir in kdirs:
+        kdir = Path(kdir)
+        z = np.load(kdir / "molecules" / "alignments.npz")
+        mol = z["mol"]
+        keep = np.random.default_rng(seed).random(int(mol.max()) + 1) < fraction
+        sel = keep[mol]
+        aln = pd.DataFrame({"read": mol[sel] + mol_off, "cell": cell_off + 2 * z["cell"][sel].astype(np.int64) + z["half"][sel],
+                            "tx_idx": z["tx_idx"][sel], "start": z["tstart"][sel], "end": z["tend"][sel],
+                            "tlen": z["tlen"][sel]})
+        mol_off += int(mol.max()) + 1
+        cell_names = (kdir / "molecules" / "cells.txt").read_text().split()
+        ct = pd.read_csv(kdir / "celltypist.tsv", sep="\t").set_index("cell")["cell_type"]
+        types = ct.reindex(cell_names).to_numpy(dtype=object)
+        info = pd.read_csv(kdir / "cells.tsv", sep="\t").drop_duplicates("cell").set_index("cell").reindex(cell_names)
+        for t, (_, r) in zip(types, info.iterrows()):
+            if not isinstance(t, str):
+                groups += [None, None]
+            elif "kit" in info.columns:
+                groups += [f"{t}|LR|{r['primer']}@{r['kit']}|{kdir.name}:{r['library']}", None]
+            else:
+                groups += [f"{t}|LR|{p}|{kdir.name}:parse" for p in PRIMERS]
+        types_all += list(types)
+        cell_off += 2 * len(cell_names)
+        parts.append(aln)
+    groups = np.array(groups, dtype=object)
+    aln = pd.concat(parts, ignore_index=True)
     aln = aln[pd.notna(groups[aln["cell"].to_numpy()])]
     print(f"LR: {aln['read'].nunique()} molecules in labelled cells", flush=True)
-    return aln, groups
+    return aln, groups, np.array(types_all, dtype=object)
 
 
 def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_cells=100):
     ref_dir, out_dir = Path(ref_dir), Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     names, tx_len = read_fasta_lengths(ref_dir / "spliceu.fa")
-    t2g = read_t2g(ref_dir / "t2g.tsv")
     unspliced = np.array([n.endswith("-U") for n in names])
 
     sr_aln, sr_groups = load_sr(sr_dirs.split(","), names, float(sr_fraction))
-    lr_aln, lr_groups = load_lr(kdir, float(lr_fraction))
+    lr_aln, lr_groups, lr_types = load_lr(kdir.split(","), float(lr_fraction))
 
     # units: cell types with >= min_cells in either platform
     sr_cells = pd.Series([g.split("|")[0] for g in sr_groups]).value_counts() // 2
-    lr_cells = pd.Series([g.split("|")[0] for g in lr_groups if g is not None]).value_counts() // 2
+    lr_cells = pd.Series([t for t in lr_types if isinstance(t, str)]).value_counts()
     n_cells = sr_cells.add(lr_cells, fill_value=0)
     units = sorted(n_cells[(sr_cells.reindex(n_cells.index, fill_value=0) >= int(min_cells))
                            | (lr_cells.reindex(n_cells.index, fill_value=0) >= int(min_cells))].index)
@@ -112,8 +133,8 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
     sr_feat = StackedFeatures([ReadPositionModel(tx_len, SR_READ_LEN, "3p"),
                                ReadPositionModel(tx_len, SR_READ_LEN, "relative")])
     def rate(g):
-        plat, primer = g.split("|")[1:3]
-        return primer_rates(primer, tx_len, SR_READ_LEN if plat == "SR" else 0, unspliced)
+        plat, kit = g.split("|")[1:3]
+        return primer_rates(kit.split("@")[0], tx_len, SR_READ_LEN if plat == "SR" else 0, unspliced)
     keep_g = lambda gs: {g: rate(g) for g in set(x for x in gs if x is not None) if g.split("|")[0] in unit_idx}
     sr_aln = sr_aln[pd.Series(sr_groups[sr_aln["cell"].to_numpy()]).isin(keep_g(sr_groups)).to_numpy()]
     lr_aln = lr_aln[pd.Series(lr_groups[lr_aln["cell"].to_numpy()]).isin(keep_g(lr_groups)).to_numpy()]
@@ -136,13 +157,14 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
                     if sr_kappa is not None and primer == "poly(dT)":
                         length[i] = sr_kappa
                 else:
-                    trunc[i] = lr_models[primer]
+                    # one truncation and one length model per long-read kit, created on first use
+                    trunc[i] = lr_models.setdefault(primer, TruncationModel(tx_len))
                     if lr_length is not None:
-                        length[i] = lr_length[primer]
+                        length[i] = lr_length.setdefault(primer, LengthBias(tx_len, extra=unspliced[:, None]))
         return keys, libs, unit_of, trunc, length
 
-    fits = {"SR_plain": (sr_libs, False, False), "SR": (sr_libs, True, False),
-            "LR_plain": (lr_libs, False, False), "LR": (lr_libs, True, False),
+    # LR alone (with truncation) is the baseline; SR alone cannot identify isoforms, so it is not fitted
+    fits = {"LR": (lr_libs, True, False),
             "joint_plain": ({**sr_libs, **lr_libs}, False, False),
             "joint": ({**sr_libs, **lr_libs}, True, True)}
     tpm, summary, bias = {}, [], []
@@ -150,10 +172,10 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
         t0 = time.time()
         sr_models = {"poly(dT)": FeatureColumns(ReadPositionModel(tx_len, SR_READ_LEN, "3p"), [0]),
                      "random hexamer": FeatureColumns(ReadPositionModel(tx_len, SR_READ_LEN, "relative"), [1])}
-        lr_models = {p: TruncationModel(tx_len) for p in PRIMERS}
+        lr_models = {}
         # LR: smooth length bias plus a separate scale for unspliced targets; SR poly(dT): the
         # scale of internal priming on unspliced targets (SR hexamer and SR poly(dT) spliced rates fixed)
-        lr_length = {p: LengthBias(tx_len, extra=unspliced[:, None]) for p in PRIMERS} if use_length else None
+        lr_length = {} if use_length else None
         sr_kappa = LengthBias(tx_len, extra=unspliced[:, None], length_terms=False, ridge=1e-3) if use_length else None
         keys, libs, unit_of, trunc, length = setup(lib_dict, use_models, sr_models, lr_models, lr_length, sr_kappa)
         present = sorted(set(unit_of))                    # units covered by this fit's libraries
@@ -178,21 +200,6 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
                         "n_iter": res.n_iter, "seconds": round(time.time() - t0, 1)})
         print(summary[-1], flush=True)
 
-    spliced = np.array([not n.endswith("-U") for n in names])
-    sp_names = np.array(names)[spliced]
-    rows = []
-    for u in both:
-        for a, b in [("SR_plain", "LR_plain"), ("SR", "LR")]:
-            ka, kb = f"{a}|{u}", f"{b}|{u}"
-            if ka in tpm and kb in tpm:
-                rows.append({"cell_type": u, "a": a, "b": b,
-                             **concordance_metrics(pd.Series(tpm[ka][spliced], index=sp_names),
-                                                   pd.Series(tpm[kb][spliced], index=sp_names), t2g, min_gene_tpm=20)})
-    conc = pd.DataFrame(rows)
-    if len(conc):
-        print(conc.groupby(["a", "b"])[["pearson_log1p", "psi_pearson", "gene_tv_median", "major_isoform_agree"]]
-              .mean().round(3).to_string())
-    conc.to_csv(out_dir / "concordance.tsv", sep="\t", index=False)
     pd.DataFrame(summary).to_csv(out_dir / "fits.tsv", sep="\t", index=False)
     if bias:
         pd.concat(bias).to_csv(out_dir / "bias.tsv", sep="\t", index=False)
