@@ -1,15 +1,16 @@
 """
 Cell calling for the Kinnex 10x PBMC long reads (extract.awk read tables).
 
-PacBio's reads are already one per molecule with corrected barcodes; a cell is
-a library-prefixed 10x barcode whose molecule count passes the barcode-rank
-inflection of its library (cells.knee_threshold), so all seven libraries are
-called the same way (two lack PacBio's own cell calls).
+PacBio's reads are already one per molecule with corrected barcodes, and the
+deduplicated BAMs hold only PacBio's called cells (e.g. 20,426 barcodes for the
+20,426 cells of the 20k-cell 3' library). A barcode-rank inflection then cuts
+inside the cell plateau, so cells are the library-prefixed barcodes with at
+least min_molecules molecules.
 
 Writes <out_dir>/cells.tsv (barcode, cell, primer, kit, library, umis) and
 barcode_ranks.tsv (molecules per barcode, by library).
 
-Run: python analyses/kinnex_10x/call_cells.py <out_dir>
+Run: python analyses/kinnex_10x/call_cells.py <out_dir> [min_molecules]
     out_dir holds reads/reads_<lib>_<k>.tsv.gz
 """
 
@@ -18,10 +19,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from joli.cells import knee_threshold
 
-
-def main(out_dir):
+def main(out_dir, min_molecules=500):
     out_dir = Path(out_dir)
     counts, kits = [], {}
     for f in sorted((out_dir / "reads").glob("reads_*.tsv.gz")):
@@ -34,7 +33,7 @@ def main(out_dir):
     rows, ranks = [], []
     for l in sorted(set(lib)):
         u = umis[lib == l]
-        thr = knee_threshold(u.to_numpy())
+        thr = float(min_molecules)
         keep = u[u >= thr]
         rows.append(pd.DataFrame({"barcode": keep.index, "cell": keep.index, "primer": "poly(dT)",
                                   "kit": kits[l], "library": l, "umis": keep.to_numpy()}))
@@ -46,4 +45,4 @@ def main(out_dir):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1])
+    main(sys.argv[1], *sys.argv[2:3])
