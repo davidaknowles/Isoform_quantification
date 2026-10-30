@@ -101,3 +101,41 @@ def library_from_salmon(name, quant_dir, transcript_names=None, use_weights=True
     if use_weights and ec_w is not None:
         c = [w * b[t] for w, t in zip(ec_w, tcc.ec_transcripts)]
     return Library(name=name, tcc=tcc, b=b, platform=platform, c=c)
+
+
+def read_fragments(path, refs_path, transcript_names, score_frac=1.0, chunksize=20_000_000):
+    """
+    Fragment alignments from salmon --writeMappings, as extracted by
+    analyses/sgnex/sam_fragments.awk (columns: fragment, @SQ index, start, length, AS).
+
+    Keeps alignments to targets in transcript_names (decoys dropped) with
+    AS >= score_frac * the fragment's best AS. Returns DataFrame with columns
+    read, tx_idx (index into transcript_names), start, flen.
+    """
+    refs = Path(refs_path).read_text().split()
+    pos = pd.Series(np.arange(len(transcript_names)), index=transcript_names)
+    ref_to_tx = pos.reindex(refs).fillna(-1).to_numpy(dtype=np.int64)
+    parts = []
+    for ch in pd.read_csv(path, sep="\t", header=None, names=["read", "ref", "start", "flen", "AS"],
+                          dtype={"read": np.int64, "ref": np.int64, "start": np.int32, "flen": np.int32, "AS": np.int32},
+                          chunksize=chunksize):
+        ch["tx_idx"] = ref_to_tx[ch["ref"].to_numpy()]
+        parts.append(ch[ch["tx_idx"] >= 0].drop(columns="ref"))
+    a = pd.concat(parts, ignore_index=True)
+    best = a.groupby("read")["AS"].transform("max")
+    a = a[a["AS"] >= score_frac * best].drop(columns="AS")
+    return a.reset_index(drop=True)
+
+
+def library_from_fragments(name, frags, transcript_names, tx_len, model):
+    """
+    Short-read Library from read_fragments output with a FragmentModel's
+    features (fragment-length and relative-start bins) in the EC keys; the
+    model's fld starts at the fragment lengths of single-alignment fragments.
+    """
+    from .paf import library_from_alignments
+    tlen = np.asarray(tx_len)[frags["tx_idx"].to_numpy()]
+    feat = model.features(frags["start"], frags["flen"], tlen)
+    single = ~frags["read"].duplicated(keep=False).to_numpy()
+    model.init_lengths(frags["flen"].to_numpy()[single])
+    return library_from_alignments(name, frags, transcript_names, features=feat, platform="short", b=model.rates())

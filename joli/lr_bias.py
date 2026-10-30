@@ -174,6 +174,78 @@ class ReadPositionModel:
             self.prof.p = p / p.sum()
 
 
+FL_EDGES = np.r_[np.arange(0.0, 1000.0, 20.0), 1000.0, 1250.0, 1500.0, 2000.0, 3000.0]
+FRAG_REL_EDGES = np.linspace(0.0, 1.0, 21)
+
+
+class FragmentModel:
+    """
+    Paired-end short-read fragment model fitted jointly with the abundances.
+
+    A fragment of length f starting at s (0-based) on transcript t of length
+    L_t has relative start u = s / (L_t - f). Then
+        P(read, t) proportional to mu_t fld(f) q(u),   b_t = sum_f fld(f) (L_t - f + 1)_+,
+    with fld a fragment-length distribution over bins (density p_j / w_j) and q a
+    positional coverage profile over bins of u (density q_k / v_k). So c = fld(f) q(u)
+    and b is the effective length under fld (approximated at bin midpoints). A
+    uniform q and salmon's fld give salmon's model without bias correction.
+
+    M-step given expected reads z per alignment: q is the weighted histogram of u;
+    fld maximises sum_j A_j log p_j - sum_l N_l log sum_j p_j K_lj with
+    K_lj = sum_t mu_lt (L_t - m_j + 1)_+ (b depends on fld), solved by the fixed
+    point p_j = A_j / sum_l N_l K_lj / B_l.
+    """
+
+    def __init__(self, tx_len, fl_edges=FL_EDGES, rel_edges=FRAG_REL_EDGES):
+        self.tx_len = np.asarray(tx_len, dtype=np.float64)
+        self.fe, self.re = np.asarray(fl_edges, dtype=np.float64), np.asarray(rel_edges, dtype=np.float64)
+        self.fw, self.rw = np.diff(self.fe), np.diff(self.re)
+        self.fmid = 0.5 * (self.fe[:-1] + self.fe[1:])
+        self.pf = np.full(len(self.fw), 1.0 / len(self.fw))
+        self.pq = np.full(len(self.rw), 1.0 / len(self.rw))
+        self.O = np.maximum(self.tx_len[:, None] - self.fmid[None, :] + 1.0, 0.0)   # (T, J) start positions
+
+    def init_lengths(self, flen, pseudo=1.0):
+        """Start fld at the histogram of fragment lengths (e.g. of uniquely aligned fragments)."""
+        h = np.bincount(self._fbin(flen), minlength=len(self.fw)) + pseudo
+        self.pf = h / h.sum()
+
+    def _fbin(self, flen):
+        return np.clip(np.searchsorted(self.fe, np.asarray(flen, dtype=np.float64), side="right") - 1, 0, len(self.fw) - 1)
+
+    def features(self, start, flen, tlen):
+        """(n, 2): fragment-length bin and relative-start bin."""
+        start, flen, tlen = (np.asarray(x, dtype=np.float64) for x in (start, flen, tlen))
+        u = np.clip(start / np.maximum(tlen - flen, 1.0), 0.0, 1.0)
+        ub = np.clip(np.searchsorted(self.re, u, side="right") - 1, 0, len(self.rw) - 1)
+        return np.column_stack([self._fbin(flen), ub])
+
+    def weights(self, tx, feat):
+        fb, ub = feat[:, 0], feat[:, 1]
+        return (self.pf[fb] / self.fw[fb]) * (self.pq[ub] / self.rw[ub])
+
+    def rates(self):
+        return np.maximum(self.O @ self.pf, 1e-12)
+
+    def mstep(self, tx, feat, z, mus, Ns, n_iter=200, tol=1e-10, pseudo=1e-3):
+        """z (n,) expected reads per alignment; mus, Ns per library sharing the model (molar mixtures, read totals)."""
+        q = np.bincount(feat[:, 1], weights=z, minlength=len(self.rw)) + pseudo
+        self.pq = q / q.sum()
+        A = np.bincount(feat[:, 0], weights=z, minlength=len(self.fw)) + pseudo
+        K = np.stack([m @ self.O for m in mus])               # (L, J)
+        Ns = np.asarray(Ns, dtype=np.float64)
+        p = self.pf.copy()
+        for _ in range(n_iter):
+            B = K @ p
+            new = A / np.maximum((Ns / B) @ K, 1e-300)
+            new /= new.sum()
+            done = np.abs(new - p).max() < tol
+            p = new
+            if done:
+                break
+        self.pf = p
+
+
 class LengthBias:
     """
     Library-specific sampling rate b_t = exp(x_t . w) multiplying the
@@ -302,7 +374,7 @@ class StackedFeatures:
         return np.column_stack([m.features(start, end, tlen) for m in self.models])
 
 
-def fit_bias(em, trunc=None, length=None, n_outer=10, run_kw=None, verbose=False, inner_max_iter=500):
+def fit_bias(em, trunc=None, length=None, frag=None, n_outer=10, run_kw=None, verbose=False, inner_max_iter=500):
     """
     Alternate JointEM runs (warm-started) with bias-model M-steps.
 
@@ -315,14 +387,16 @@ def fit_bias(em, trunc=None, length=None, n_outer=10, run_kw=None, verbose=False
                  The library's c becomes base c x b_t x q(position | t). Libraries mapped to
                  the same model object share it (one pooled M-step).
         length : dict {library index: LengthBias}, shared in the same way.
+        frag   : dict {library index: FragmentModel} -- models that set both c (fld(f) q(u))
+                 and b (effective length under fld); the library's base b is not used.
         n_outer: number of outer iterations.
         inner_max_iter : MM-step cap for the fits between bias updates (the final fit uses run_kw).
     Returns:
         JointResult of the final run; models are updated in place.
     """
-    trunc, length = trunc or {}, length or {}
+    trunc, length, frag = trunc or {}, length or {}, frag or {}
     run_kw = dict(run_kw or {})
-    libs = set(trunc) | set(length)
+    libs = set(trunc) | set(length) | set(frag)
     base_c = {l: em.libs[l].c.copy() for l in libs}
     base_b = {l: em.libs[l].b.copy() for l in libs}
 
@@ -331,6 +405,9 @@ def fit_bias(em, trunc=None, length=None, n_outer=10, run_kw=None, verbose=False
             fl = em.libs[l]
             c = base_c[l].copy()
             b = base_b[l].copy()
+            if l in frag:
+                c *= frag[l].weights(fl.tx, fl.feat)
+                b = frag[l].rates()
             if l in trunc:
                 # positional density times the base sampling rate (c = b q)
                 c *= trunc[l].weights(fl.tx, fl.feat) * base_b[l][fl.tx]
@@ -351,6 +428,12 @@ def fit_bias(em, trunc=None, length=None, n_outer=10, run_kw=None, verbose=False
             fls = [em.libs[l] for l in ls]
             model.mstep(np.concatenate([fl.tx for fl in fls]), np.concatenate([fl.feat for fl in fls]),
                         np.concatenate([em.position_counts(res.theta, l) for l in ls]))
+        for model, ls in _by_model(frag).items():
+            fls = [em.libs[l] for l in ls]
+            zs = [em.position_counts(res.theta, l) for l in ls]
+            mus = [em.pi[l] @ res.theta for l in ls]
+            model.mstep(np.concatenate([fl.tx for fl in fls]), np.concatenate([fl.feat for fl in fls]),
+                        np.concatenate(zs), mus, [z.sum() for z in zs])
         for model, ls in _by_model(length).items():
             mus = []
             for l in ls:

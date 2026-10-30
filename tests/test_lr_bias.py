@@ -152,3 +152,60 @@ def test_unspliced_internal_priming_scale_recovered():
     est = r[unspliced].mean() / r[~unspliced].mean()        # learned multiplier on the base rate L
     assert abs(np.log(est) - np.log(kappa * L[unspliced].mean() / (L[unspliced] + 1).mean())) < 0.1, est
     np.testing.assert_allclose(res.theta[0], theta, atol=5e-3)
+
+
+def test_fragment_model_corrects_3prime_coverage_bias():
+    """
+    Genes with a long isoform (unique 5' exon + shared body) and a short isoform
+    (shared body only). SR fragment starts are 3'-biased (u ~ Beta(3, 1));
+    an unbiased LR library shares theta. The fragment model learns q and fld
+    and improves theta over a uniform-coverage model.
+    """
+    from joli.joint import JointEM, Library
+    from joli.load_tcc import TCCData
+    from joli.lr_bias import FragmentModel, fit_bias
+    rng = np.random.default_rng(11)
+    G = 150
+    names, lens, offs = [], [], []
+    for g in range(G):
+        A, B = rng.integers(300, 1500), rng.integers(800, 2500)
+        names += [f"g{g}_long", f"g{g}_short"]
+        lens += [A + B, B]
+        offs.append(A)
+    lens = np.array(lens, dtype=float)
+    T = len(names)
+    theta = rng.dirichlet(np.ones(T))
+    fld_mean = 300
+    # SR: molecules ~ theta * eff len, fragment f ~ N(300, 50), start u ~ Beta(3, 1)
+    n_sr = 200000
+    flen_all = np.clip(rng.normal(fld_mean, 50, size=4 * n_sr).astype(int), 100, 600)
+    eff = np.array([np.mean(np.maximum(L - flen_all[:2000] + 1, 0)) for L in lens])
+    tx = rng.choice(T, size=n_sr, p=theta * eff / (theta * eff).sum())
+    f = flen_all[:n_sr]
+    ok = f < lens[tx]
+    tx, f = tx[ok], f[ok]
+    s = (rng.beta(3, 1, size=len(tx)) * (lens[tx] - f)).astype(int)
+    rows = []
+    for r, (t, st, fl) in enumerate(zip(tx, s, f)):
+        g, A = t // 2, offs[t // 2]
+        s_long = st if t % 2 == 0 else st + A
+        rows.append((r, 2 * g, s_long, fl))
+        if s_long >= A:
+            rows.append((r, 2 * g + 1, s_long - A, fl))
+    frags = pd.DataFrame(rows, columns=["read", "tx_idx", "start", "flen"])
+    model = FragmentModel(lens)
+    from joli.salmon_io import library_from_fragments
+    sr = library_from_fragments("sr", frags, names, lens, model)
+    # LR: one read per molecule, uniquely assigned
+    n_lr = rng.multinomial(20000, theta).astype(float)
+    lr = Library("lr", TCCData(ec_counts=n_lr, ec_transcripts=[np.array([t]) for t in range(T)], transcript_names=names,
+                               total_reads=int(n_lr.sum()), n_targets=T, sample_dir=""), b=np.ones(T), platform="long")
+    uniform = FragmentModel(lens); uniform.pf = model.pf.copy()
+    em0 = JointEM([Library("sr", sr.tcc, uniform.rates(), "short", feat=sr.feat), lr], units=[0, 0])
+    res0 = em0.run()
+    res1 = fit_bias(JointEM([sr, lr], units=[0, 0]), frag={0: model}, n_outer=10)
+    err0, err1 = np.abs(res0.theta[0] - theta).sum(), np.abs(res1.theta[0] - theta).sum()
+    assert err1 < 0.6 * err0, (err0, err1)
+    assert model.pq[-5:].sum() > 0.45          # learned 3' bias (Beta(3,1): 0.58 of mass in the last quarter)
+    mean_f = (model.pf * model.fmid).sum()
+    assert abs(mean_f - fld_mean) < 25
