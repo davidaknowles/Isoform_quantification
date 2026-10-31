@@ -13,8 +13,12 @@ Stages:
 
 Transcript indices follow the alignment reference (spliceu.fa order).
 
+  combine_stream  for reads already one per molecule: cell x gene counts summed over chunks;
+             the chunk files stay the per-molecule alignments (no alignments.npz).
+
 Run: python analyses/kinnex_parse/molecules.py <kinnex_dir> <ref_dir> chunk <k>
      python analyses/kinnex_parse/molecules.py <kinnex_dir> <ref_dir> combine
+     python analyses/kinnex_parse/molecules.py <kinnex_dir> <ref_dir> combine_stream
 """
 
 import re
@@ -71,33 +75,67 @@ def combine(kdir, ref_dir):
         out[key] = a[key][keep]
     np.savez(kdir / "molecules" / "alignments.npz", **out)
 
-    # gene of each molecule if its alignments share one gene
+    n_cells = int(out["cell"].max()) + 1
+    gcode, gnames = gene_codes(ref_dir)
+    M = gene_counts(out["mol"], out["cell"], out["tx_idx"], gcode, n_cells, len(gnames))
+    write_counts(kdir, ref_dir, M, gnames)
+    print(f"{len(rd)} molecules, {keep.sum()} alignments; {int(M.sum())} gene-unique molecules, "
+          f"median per cell {np.median(np.asarray(M.sum(1)).ravel()):.0f}", flush=True)
+
+
+def combine_stream(kdir, ref_dir):
+    """
+    For reads that are already one per molecule (e.g. PacBio's UMI-deduplicated
+    10x reads): sum the cell x gene counts chunk by chunk without deduplication
+    or a combined alignment file; the joint fit reads the chunk files directly.
+    """
+    gcode, gnames = gene_codes(ref_dir)
+    cells = pd.read_csv(kdir / "cells.tsv", sep="\t")
+    n_cells = cells["cell"].nunique()
+    M = None
+    for f in sorted((kdir / "molecules").glob("chunk_*.npz")):
+        z = np.load(f)
+        mol = pd.factorize(z["read"])[0]
+        m = gene_counts(mol, z["cell"], z["tx_idx"], gcode, n_cells, len(gnames))
+        M = m if M is None else M + m
+        print(f"{f.name}: {mol.max() + 1} molecules", flush=True)
+    write_counts(kdir, ref_dir, M, gnames)
+    (kdir / "molecules" / "STREAMED").write_text("chunk_*.npz are the per-molecule alignments\n")
+    print(f"{int(M.sum())} gene-unique molecules, median per cell {np.median(np.asarray(M.sum(1)).ravel()):.0f}", flush=True)
+
+
+def gene_codes(ref_dir):
+    """Gene code of every reference target (spliceu.fa order) and the gene ids."""
     names, _ = read_fasta_lengths(ref_dir / "spliceu.fa")
     t2g = pd.read_csv(ref_dir / "t2g.tsv", sep="\t", header=None, index_col=0)[1]
     gcode, gnames = pd.factorize(t2g.reindex(names))
-    ga = gcode[out["tx_idx"]]
-    n_mol = int(out["mol"].max()) + 1
+    return gcode, np.asarray(gnames)
+
+
+def gene_counts(mol, cell, tx_idx, gcode, n_cells, n_genes):
+    """Cell x gene counts of molecules whose alignments all fall in one gene."""
+    ga = gcode[tx_idx]
+    n_mol = int(mol.max()) + 1
     gmin = np.full(n_mol, np.iinfo(np.int64).max); gmax = np.full(n_mol, -1)
-    np.minimum.at(gmin, out["mol"], ga); np.maximum.at(gmax, out["mol"], ga)
+    np.minimum.at(gmin, mol, ga); np.maximum.at(gmax, mol, ga)
     uniq = np.flatnonzero((gmin == gmax) & (gmin >= 0))
-    mcell_all = np.zeros(n_mol, dtype=np.int64); mcell_all[out["mol"]] = out["cell"]
-    g = pd.Series(np.asarray(gnames)[gmin[uniq]], index=uniq)
-    mcell = mcell_all[uniq]
+    mcell = np.zeros(n_mol, dtype=np.int64); mcell[mol] = cell
+    return sp.csr_matrix((np.ones(len(uniq)), (mcell[uniq], gmin[uniq])), shape=(n_cells, n_genes))
+
+
+def write_counts(kdir, ref_dir, M, gnames):
+    """counts.mtx (cells x expressed genes), cells.txt, genes.txt (gene symbols)."""
     sym = {}
     with open(ref_dir / "basic.gtf") as fh:
         for line in fh:
             f = line.split("\t")
             if len(f) > 8 and f[2] == "gene":
                 sym[re.search('gene_id "([^"]+)"', f[8]).group(1)] = re.search('gene_name "([^"]+)"', f[8]).group(1)
-    genes, gidx = np.unique(g.to_numpy().astype(str), return_inverse=True)
-    n_cells = int(out["cell"].max()) + 1
-    M = sp.csr_matrix((np.ones(len(gidx)), (mcell.astype(np.int64), gidx)), shape=(n_cells, len(genes)))
-    scipy.io.mmwrite(kdir / "molecules" / "counts.mtx", M)
+    expressed = np.flatnonzero(np.asarray(M.sum(0)).ravel() > 0)
+    scipy.io.mmwrite(kdir / "molecules" / "counts.mtx", M[:, expressed])
     cells = pd.read_csv(kdir / "cells.tsv", sep="\t")
     (kdir / "molecules" / "cells.txt").write_text("\n".join(pd.unique(cells["cell"])) + "\n")
-    (kdir / "molecules" / "genes.txt").write_text("\n".join(sym.get(x, x) for x in genes) + "\n")
-    print(f"{len(rd)} molecules, {keep.sum()} alignments; {len(g)} gene-unique molecules, "
-          f"median per cell {np.median(np.asarray(M.sum(1)).ravel()):.0f}", flush=True)
+    (kdir / "molecules" / "genes.txt").write_text("\n".join(sym.get(x, x) for x in gnames[expressed]) + "\n")
 
 
 if __name__ == "__main__":
@@ -105,5 +143,7 @@ if __name__ == "__main__":
     (kdir / "molecules").mkdir(exist_ok=True)
     if stage == "chunk":
         chunk(kdir, ref_dir, sys.argv[4])
+    elif stage == "combine_stream":
+        combine_stream(kdir, ref_dir)
     else:
         combine(kdir, ref_dir)

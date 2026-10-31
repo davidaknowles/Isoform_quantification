@@ -3,7 +3,8 @@
 #   extract   one task per library (libraries.tsv row): dedup BAM -> 20M-read cDNA/read-table chunks
 #   align     one task per chunk (chunks.txt): minimap2 to the spliceu transcripts used for Parse SR
 #   molecules one task per chunk: strict sense alignments joined to cells (kinnex_parse/molecules.py)
-#   combine   per-molecule alignments, cell x gene matrix, CellTypist labels
+#   combine   cell x gene matrix summed over chunks (reads are already one per molecule; the
+#             chunk files stay the per-molecule alignments) and CellTypist labels
 #
 # Run: sbatch --array=1-7 analyses/kinnex_10x/run.sh extract
 #      ls <out>/reads/cdna_*.fa.gz | sed 's/.*cdna_//; s/.fa.gz//' > <out>/chunks.txt
@@ -38,7 +39,7 @@ case $1 in
     k=$(sed -n "${SLURM_ARRAY_TASK_ID}p" $OUT/chunks.txt)
     ~/venv/joli/bin/python $REPO/analyses/kinnex_parse/molecules.py $OUT $REF chunk $k ;;
   combine)
-    ~/venv/joli/bin/python $REPO/analyses/kinnex_parse/molecules.py $OUT $REF combine
+    ~/venv/joli/bin/python $REPO/analyses/kinnex_parse/molecules.py $OUT $REF combine_stream
     module load python/3.12.3-GCCcore-13.3.0
     ~/venv/celltypist/bin/python $REPO/analyses/kinnex_parse/celltypist_labels.py $OUT/molecules $OUT/celltypist.tsv ;;
 esac

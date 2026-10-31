@@ -71,7 +71,9 @@ def load_sr(series_dirs, names, fraction):
 def load_lr(kdirs, fraction, seed=0):
     """
     Long-read molecules of one or more processed long-read directories
-    (molecules/alignments.npz, molecules/cells.txt, celltypist.tsv, cells.tsv).
+    (molecules/alignments.npz, or molecules/chunk_*.npz when reads are already one
+    per molecule; molecules/cells.txt, celltypist.tsv, cells.tsv). A random
+    fraction of molecules is kept.
 
     Each (cell, primer half) gets a group label "<cell type>|LR|<kit>|<dir>:<library>".
     The kit names the read-end/length behaviour: the Parse RT primer for Kinnex
@@ -82,14 +84,21 @@ def load_lr(kdirs, fraction, seed=0):
     parts, groups, types_all, mol_off, cell_off = [], [], [], 0, 0
     for kdir in kdirs:
         kdir = Path(kdir)
-        z = np.load(kdir / "molecules" / "alignments.npz")
-        mol = z["mol"]
-        keep = np.random.default_rng(seed).random(int(mol.max()) + 1) < fraction
-        sel = keep[mol]
-        aln = pd.DataFrame({"read": mol[sel] + mol_off, "cell": cell_off + 2 * z["cell"][sel].astype(np.int64) + z["half"][sel],
-                            "tx_idx": z["tx_idx"][sel], "start": z["tstart"][sel], "end": z["tend"][sel],
-                            "tlen": z["tlen"][sel]})
-        mol_off += int(mol.max()) + 1
+        rng = np.random.default_rng(seed)
+        if (kdir / "molecules" / "alignments.npz").exists():
+            sources = [kdir / "molecules" / "alignments.npz"]
+        else:   # streamed (reads already one per molecule): per-chunk alignment files
+            sources = sorted((kdir / "molecules").glob("chunk_*.npz"))
+        for src in sources:
+            z = np.load(src)
+            mol = z["mol"] if "mol" in z else pd.factorize(z["read"])[0]
+            keep = rng.random(int(mol.max()) + 1) < fraction
+            sel = keep[mol]
+            parts.append(pd.DataFrame({"read": mol[sel] + mol_off,
+                                       "cell": cell_off + 2 * z["cell"][sel].astype(np.int64) + z["half"][sel],
+                                       "tx_idx": z["tx_idx"][sel], "start": z["tstart"][sel], "end": z["tend"][sel],
+                                       "tlen": z["tlen"][sel]}))
+            mol_off += int(mol.max()) + 1
         cell_names = (kdir / "molecules" / "cells.txt").read_text().split()
         ct = pd.read_csv(kdir / "celltypist.tsv", sep="\t").set_index("cell")["cell_type"]
         types = ct.reindex(cell_names).to_numpy(dtype=object)
@@ -103,7 +112,6 @@ def load_lr(kdirs, fraction, seed=0):
                 groups += [f"{t}|LR|{p}|{kdir.name}:parse" for p in PRIMERS]
         types_all += list(types)
         cell_off += 2 * len(cell_names)
-        parts.append(aln)
     groups = np.array(groups, dtype=object)
     aln = pd.concat(parts, ignore_index=True)
     aln = aln[pd.notna(groups[aln["cell"].to_numpy()])]
