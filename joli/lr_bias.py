@@ -30,7 +30,7 @@ truncated multinomial data), iterated to convergence.
 import numpy as np
 
 DEFAULT_EDGES = np.array([0, 1, 3, 10, 25, 50, 100, 150, 200, 300, 400, 600, 800, 1000,
-                          1500, 2000, 3000, 5000, 10000, 200000], dtype=np.float64)
+                          1500, 2000, 3000, 5000, 10000, 30000], dtype=np.float64)
 
 
 class EndProfile:
@@ -73,6 +73,8 @@ class EndProfile:
         Za, Oa = Z[act], O[act]
         p = self.p.copy()
         support = (Za @ Oa) > 0               # bins reachable by some expressed transcript
+        if not support.any():
+            return
         A = np.where(support, A, 0.0)
         p = np.where(support, p, 0.0)
         p /= p.sum()
@@ -88,29 +90,61 @@ class EndProfile:
         self.p = p
 
 
-class TruncationModel:
-    """5' and 3' end profiles for one long-read library."""
+LEN_EDGES = np.array([0, 100, 200, 300, 400, 500, 600, 800, 1000, 1250, 1500, 2000, 2500, 3000,
+                      4000, 5000, 7500, 10000, 30000], dtype=np.float64)
 
-    def __init__(self, tx_len, edges5=DEFAULT_EDGES, edges3=DEFAULT_EDGES):
+
+class TruncationModel:
+    """
+    5' and 3' end profiles for one long-read library.
+
+    Targets in `uniform` (e.g. unspliced gene-span targets) get a read placed
+    uniformly with a length drawn from a read-length distribution g:
+    P(start, length | t) = g(length) / (L_t + 1), a density over the same two
+    read-geometry coordinates as q5(d5) q3(d3) on other targets. g is learned
+    from reads assigned to those targets (alignment length is a third feature
+    when any target is uniform), and they are left out of the end-profile
+    M-step: read-end distances on a pre-mRNA span say nothing about truncation,
+    and profile mass at distances only those long targets reach is otherwise
+    unidentified and can drift, shrinking their weights and starving them of reads.
+    """
+
+    def __init__(self, tx_len, edges5=DEFAULT_EDGES, edges3=DEFAULT_EDGES, uniform=None, len_edges=LEN_EDGES):
         self.tx_len = np.asarray(tx_len, dtype=np.float64)
         self.end5 = EndProfile(edges5)
         self.end3 = EndProfile(edges3)
         self.O5 = self.end5.overlap(self.tx_len)
         self.O3 = self.end3.overlap(self.tx_len)
+        self.uniform = np.zeros(len(self.tx_len), dtype=bool) if uniform is None else np.asarray(uniform, dtype=bool)
+        self.length = EndProfile(len_edges)              # read-length distribution on uniform targets
 
     def features(self, tstart, tend, tlen):
-        """Integer features (n, 2): bin of d5 = tstart and of d3 = tlen - tend."""
+        """Integer features: bins of d5 = tstart and d3 = tlen - tend, plus alignment length if any target is uniform."""
         tstart, tend, tlen = (np.asarray(x, dtype=np.float64) for x in (tstart, tend, tlen))
-        return np.column_stack([self.end5.bin(tstart), self.end3.bin(tlen - tend)])
+        cols = [self.end5.bin(tstart), self.end3.bin(tlen - tend)]
+        if self.uniform.any():
+            cols.append(self.length.bin(tend - tstart))
+        return np.column_stack(cols)
 
     def weights(self, tx, feat):
-        """c (n,) for alignments to transcripts tx with features feat (n, 2)."""
+        """c (n,) for alignments to transcripts tx with features feat."""
         F5 = self.end5.norm(self.O5)
         F3 = self.end3.norm(self.O3)
-        return self.end5.weight(feat[:, 0], tx, F5) * self.end3.weight(feat[:, 1], tx, F3)
+        w = self.end5.weight(feat[:, 0], tx, F5) * self.end3.weight(feat[:, 1], tx, F3)
+        u = self.uniform[tx]
+        if u.any():
+            lb = feat[u, 2]
+            w[u] = self.length.p[lb] / self.length.width[lb] / (self.tx_len[tx[u]] + 1.0)
+        return w
 
     def mstep(self, tx, feat, z):
-        """Update both profiles from expected reads z (n,) of alignments (tx, feat)."""
+        """Update the end profiles from alignments to non-uniform targets and g from uniform ones."""
+        u = self.uniform[tx]
+        if u.any():
+            g = np.bincount(feat[u, 2], weights=z[u], minlength=self.length.J) + 1e-3
+            self.length.p = g / g.sum()
+        keep = ~u
+        tx, feat, z = tx[keep], feat[keep], z[keep]
         T = len(self.tx_len)
         Z = np.bincount(tx, weights=z, minlength=T)
         self.end5.mstep(np.bincount(feat[:, 0], weights=z, minlength=self.end5.J), Z, self.O5)
@@ -119,7 +153,7 @@ class TruncationModel:
 
 REL_EDGES = np.linspace(0.0, 1.0, 21)
 D3_EDGES = np.array([0, 25, 50, 100, 150, 200, 300, 400, 500, 750, 1000, 1500, 2000, 3000,
-                     5000, 10000, 30000, 100000, 3e6], dtype=np.float64)
+                     5000, 10000, 30000], dtype=np.float64)
 
 
 class ReadPositionModel:
@@ -136,11 +170,13 @@ class ReadPositionModel:
                         q(s | t) = p_j / (w_j (L_t - r + 1)).
     weights() returns the density q(s | t); fit_bias multiplies it by the library's
     sampling rate b_t, so a uniform profile reproduces the position-free model when
-    b_t = L_t - r + 1.
+    b_t = L_t - r + 1. Targets in `uniform` (unspliced gene-span targets) get
+    q = 1 / (L_t - r + 1) and are left out of the M-step (see TruncationModel).
     """
 
-    def __init__(self, tx_len, read_len=150, mode="3p", edges=None):
+    def __init__(self, tx_len, read_len=150, mode="3p", edges=None, uniform=None):
         self.mode = mode
+        self.uniform = np.zeros(len(tx_len), dtype=bool) if uniform is None else np.asarray(uniform, dtype=bool)
         self.span = np.maximum(np.asarray(tx_len, dtype=np.float64) - read_len, 0.0)  # max start / max d3
         if mode == "3p":
             self.prof = EndProfile(D3_EDGES if edges is None else edges)
@@ -162,10 +198,16 @@ class ReadPositionModel:
     def weights(self, tx, feat):
         j = feat[:, 0]
         if self.mode == "3p":
-            return self.prof.weight(j, tx, self.prof.norm(self.O))
-        return self.prof.p[j] / self.prof.width[j] / (self.span[tx] + 1.0)
+            w = self.prof.weight(j, tx, self.prof.norm(self.O))
+        else:
+            w = self.prof.p[j] / self.prof.width[j] / (self.span[tx] + 1.0)
+        u = self.uniform[tx]
+        w[u] = 1.0 / (self.span[tx[u]] + 1.0)
+        return w
 
     def mstep(self, tx, feat, z):
+        keep = ~self.uniform[tx]
+        tx, feat, z = tx[keep], feat[keep], z[keep]
         A = np.bincount(feat[:, 0], weights=z, minlength=self.prof.J)
         if self.mode == "3p":
             self.prof.mstep(A, np.bincount(tx, weights=z, minlength=len(self.span)), self.O)

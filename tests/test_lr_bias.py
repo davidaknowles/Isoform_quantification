@@ -209,3 +209,51 @@ def test_fragment_model_corrects_3prime_coverage_bias():
     assert model.pq[-5:].sum() > 0.45          # learned 3' bias (Beta(3,1): 0.58 of mass in the last quarter)
     mean_f = (model.pf * model.fmid).sum()
     assert abs(mean_f - fld_mean) < 25
+
+
+def test_uniform_unspliced_targets_keep_truncation_identified():
+    """
+    Spliced transcripts (1-4 kb) with 3'-anchored reads and unspliced gene-span
+    targets (20-200 kb) with uniformly placed intronic reads at kappa = 1e-5 per base
+    (internal priming). Exonic reads of a spliced molecule also align to its gene
+    span. With the gene spans marked uniform, the profile keeps its 3' mass and the
+    unspliced-to-spliced ratio is recovered (a single library cannot separate kappa
+    from theta_U, so the fit gives kappa * theta_U / theta_spliced).
+    """
+    from joli.lr_bias import fit_bias
+    rng = np.random.default_rng(13)
+    G = 100
+    names, lens, unspl = [], [], []
+    for g in range(G):
+        names += [f"g{g}", f"g{g}-U"]
+        lens += [rng.integers(1000, 4000), rng.integers(20000, 200000)]
+        unspl += [False, True]
+    lens, unspl = np.array(lens, dtype=float), np.array(unspl)
+    theta = rng.dirichlet(np.ones(2 * G))
+    n = 40000
+    kappa = 1e-5
+    rate = np.where(unspl, kappa * (lens + 1), 1.0)
+    tx = rng.choice(2 * G, size=n, p=theta * rate / (theta * rate).sum())
+    rows = []
+    for r, t in enumerate(tx):
+        L = lens[t]
+        if unspl[t]:                                      # intronic read, uniform position, 800 nt
+            s = rng.integers(0, int(L) - 800)
+            rows.append((r, names[t], s, s + 800, L))
+        else:                                             # 3'-anchored, 5'-truncated
+            s = 0 if rng.random() < 0.5 else rng.integers(0, int(L) - 300)
+            rows.append((r, names[t], s, L, L))
+            # the same read also fits the gene span (exons placed at its 3' end, introns ignored)
+            Lu = lens[t + 1]
+            rows.append((r, names[t + 1], Lu - (L - s), Lu, Lu))
+    aln = pd.DataFrame(rows, columns=["read", "tx", "tstart", "tend", "tlen"])
+    aln["AS"] = 100.0
+    from joli.alevin import primer_rates
+    b = primer_rates("poly(dT)", lens, 0, unspl)
+    model = TruncationModel(lens, uniform=unspl)
+    lib = library_from_alignments("lr", aln, names, features=model.features(aln.tstart, aln.tend, aln.tlen), b=b)
+    res = fit_bias(JointEM([lib]), trunc={0: model}, n_outer=10)
+    assert model.end3.p[0] > 0.9                         # reads end at the 3' end of spliced transcripts
+    est_u = res.theta[0][unspl].sum()
+    est_ratio, true_ratio = est_u / (1 - est_u), kappa * theta[unspl].sum() / theta[~unspl].sum()
+    assert abs(np.log(est_ratio / true_ratio)) < 0.15, (est_ratio, true_ratio)

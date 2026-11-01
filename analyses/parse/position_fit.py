@@ -72,7 +72,7 @@ def main(series_dir, ref_dir, out_dir, fraction=1.0, min_cells=200):
     keep_cells = cells["unit"].isin(units).to_numpy()
     aln = aln[keep_cells[aln["cell"].to_numpy()]]
     group_rates = {g: rates[g.rsplit("|", 1)[1]] for g in cells["group"].unique()}
-    models = {p: ReadPositionModel(tx_len, READ_LEN, mode=m) for p, (_, m) in PRIMERS.items()}
+    models = {p: ReadPositionModel(tx_len, READ_LEN, mode=m, uniform=unspliced) for p, (_, m) in PRIMERS.items()}
     feat_model = StackedFeatures(models.values())
     lib_of = libraries_from_molecules(aln, cells["group"].to_numpy(), names, group_rates, model=feat_model)
     print(f"{len(units)} units, {len(lib_of)} libraries", flush=True)
@@ -85,13 +85,13 @@ def main(series_dir, ref_dir, out_dir, fraction=1.0, min_cells=200):
         fits = {}                                   # libraries, positional models, length/covariate models
         for p, (short, mode) in PRIMERS.items():
             fits[short] = ([L[p]], {}, {})
-            fits[f"{short}+pos"] = ([L[p]], {0: FeatureColumns(ReadPositionModel(tx_len, READ_LEN, mode=mode), [COLUMN[p]])}, {})
+            fits[f"{short}+pos"] = ([L[p]], {0: FeatureColumns(ReadPositionModel(tx_len, READ_LEN, mode=mode, uniform=unspliced), [COLUMN[p]])}, {})
         both = [L["poly(dT)"], L["random hexamer"]]
         # scale of poly(dT) internal priming on unspliced targets, identifiable when both primers share theta
         kappa = lambda: {0: LengthBias(tx_len, extra=unspliced[:, None], length_terms=False, ridge=1e-3)}
         fits["dT+hex"] = (both, {}, kappa())
-        fits["dT+hex+pos"] = (both, {0: FeatureColumns(ReadPositionModel(tx_len, READ_LEN, mode="3p"), [0]),
-                                     1: FeatureColumns(ReadPositionModel(tx_len, READ_LEN, mode="relative"), [1])}, kappa())
+        fits["dT+hex+pos"] = (both, {0: FeatureColumns(ReadPositionModel(tx_len, READ_LEN, mode="3p", uniform=unspliced), [0]),
+                                     1: FeatureColumns(ReadPositionModel(tx_len, READ_LEN, mode="relative", uniform=unspliced), [1])}, kappa())
         for fit, (libs_f, pos, length) in fits.items():
             t0 = time.time()
             em = JointEM(libs_f, units=[0] * len(libs_f))

@@ -138,8 +138,8 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
     print(f"{len(units)} units, {len(both)} with both platforms: {both}", flush=True)
     unit_idx = {u: k for k, u in enumerate(units)}
 
-    sr_feat = StackedFeatures([ReadPositionModel(tx_len, SR_READ_LEN, "3p"),
-                               ReadPositionModel(tx_len, SR_READ_LEN, "relative")])
+    sr_feat = StackedFeatures([ReadPositionModel(tx_len, SR_READ_LEN, "3p", uniform=unspliced),
+                               ReadPositionModel(tx_len, SR_READ_LEN, "relative", uniform=unspliced)])
     def rate(g):
         plat, kit = g.split("|")[1:3]
         return primer_rates(kit.split("@")[0], tx_len, SR_READ_LEN if plat == "SR" else 0, unspliced)
@@ -148,7 +148,7 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
     lr_aln = lr_aln[pd.Series(lr_groups[lr_aln["cell"].to_numpy()]).isin(keep_g(lr_groups)).to_numpy()]
     sr_libs = libraries_from_molecules(sr_aln, sr_groups, names, keep_g(sr_groups), model=sr_feat)
     lr_libs = libraries_from_molecules(lr_aln, lr_groups, names, keep_g(lr_groups),
-                                       model=TruncationModel(tx_len), platform="long")
+                                       model=TruncationModel(tx_len, uniform=unspliced), platform="long")
     del sr_aln, lr_aln
     print(f"{len(sr_libs)} SR and {len(lr_libs)} LR libraries", flush=True)
 
@@ -166,7 +166,7 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
                         length[i] = sr_kappa
                 else:
                     # one truncation and one length model per long-read kit, created on first use
-                    trunc[i] = lr_models.setdefault(primer, TruncationModel(tx_len))
+                    trunc[i] = lr_models.setdefault(primer, TruncationModel(tx_len, uniform=unspliced))
                     if lr_length is not None:
                         length[i] = lr_length.setdefault(primer, LengthBias(tx_len, extra=unspliced[:, None]))
         return keys, libs, unit_of, trunc, length
@@ -178,8 +178,8 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
     tpm, summary, bias = {}, [], []
     for fit, (lib_dict, use_models, use_length) in fits.items():
         t0 = time.time()
-        sr_models = {"poly(dT)": FeatureColumns(ReadPositionModel(tx_len, SR_READ_LEN, "3p"), [0]),
-                     "random hexamer": FeatureColumns(ReadPositionModel(tx_len, SR_READ_LEN, "relative"), [1])}
+        sr_models = {"poly(dT)": FeatureColumns(ReadPositionModel(tx_len, SR_READ_LEN, "3p", uniform=unspliced), [0]),
+                     "random hexamer": FeatureColumns(ReadPositionModel(tx_len, SR_READ_LEN, "relative", uniform=unspliced), [1])}
         lr_models = {}
         # LR: smooth length bias plus a separate scale for unspliced targets; SR poly(dT): the
         # scale of internal priming on unspliced targets (SR hexamer and SR poly(dT) spliced rates fixed)
