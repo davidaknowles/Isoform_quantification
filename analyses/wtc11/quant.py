@@ -7,11 +7,13 @@ GENCODE v38 transcript order of the reference fasta.
 
 Fits (all one unit, no prior):
   SR:nobias, SR:bias                                 salmon ECs
-  PB, CT, ONT (plain, +trunc)                        minimap2 ECs (best-score ties), truncation model
+  PB, CT, ONT (plain, +trunc, +anch)                 minimap2 ECs (best-score ties); independent 5'/3' end
+                                                     profiles (TruncationModel) or the anchored censored-length
+                                                     model (AnchoredTruncationModel)
   PB@0.95, CT@0.95, ONT@0.95                         minimap2 ECs, alignments with AS >= 0.95 best
-  SR:bias+PB+trunc, SR:bias+CT+trunc, SR:bias+ONT+trunc
+  SR:bias+{PB,CT,ONT}+{trunc,anch}
 Writes {out_dir}/{bs}_tpm.tsv.gz (transcripts x fits) and the learned
-truncation profiles {bs}_trunc.tsv.
+truncation profiles {bs}_trunc.tsv and anchored-model components {bs}_anch.tsv.
 
 Run: python analyses/wtc11/quant.py <bs> <wtc11_dir> <ref_fasta> <out_dir> [minimap2_subdir] [lr_only]
     minimap2_subdir defaults to minimap2 (e.g. minimap2_sirv for a reference with spike-ins);
@@ -25,7 +27,7 @@ from pathlib import Path
 import pandas as pd
 
 from joli.joint import JointEM, molar_to_tpm
-from joli.lr_bias import TruncationModel, fit_with_truncation
+from joli.lr_bias import AnchoredTruncationModel, TruncationModel, fit_with_truncation
 from joli.paf import filter_alignments, library_from_alignments, read_fasta_lengths, read_paf
 from joli.salmon_io import library_from_salmon
 
@@ -47,7 +49,8 @@ def main(bs, wtc11_dir, ref_fasta, out_dir, mm_subdir="minimap2", lr_only=False)
         aln = filter_alignments(raw, strand=strand)
         lr[plat + "@0.95"] = library_from_alignments(plat, filter_alignments(raw, score_frac=0.95, strand=strand), names)
         del raw
-        feat = TruncationModel(tx_len).features(aln["tstart"], aln["tend"], aln["tlen"])
+        # (d5, d3, aligned length) bins; TruncationModel reads the first two
+        feat = AnchoredTruncationModel(tx_len).features(aln["tstart"], aln["tend"], aln["tlen"])
         lr[plat] = library_from_alignments(plat, aln, names)
         lr[plat + "+trunc"] = library_from_alignments(plat, aln, names, features=feat)
         print(f"loaded {plat}: {aln['read'].nunique()} reads, {len(aln)} alignments ({time.time() - t0:.0f} s)", flush=True)
@@ -56,17 +59,22 @@ def main(bs, wtc11_dir, ref_fasta, out_dir, mm_subdir="minimap2", lr_only=False)
     for plat in ["PB", "CT", "ONT"]:
         fits[plat] = [lr[plat]]
         fits[plat + "@0.95"] = [lr[plat + "@0.95"]]
-        fits[plat + "+trunc"] = [lr[plat + "+trunc"]]
-        if not lr_only:
-            fits[f"SR:bias+{plat}+trunc"] = [sr["bias"], lr[plat + "+trunc"]]
-    tpm, profiles, summary = {}, [], []
+        for kind in ["trunc", "anch"]:
+            fits[f"{plat}+{kind}"] = [lr[plat + "+trunc"]]
+            if not lr_only:
+                fits[f"SR:bias+{plat}+{kind}"] = [sr["bias"], lr[plat + "+trunc"]]
+    tpm, profiles, anch, summary = {}, [], [], []
     for fit, libs in fits.items():
         t0 = time.time()
         em = JointEM(libs, units=[0] * len(libs))
-        trunc = {l: TruncationModel(tx_len) for l, lib in enumerate(libs) if lib.feat is not None}
+        Model = AnchoredTruncationModel if fit.endswith("+anch") else TruncationModel
+        trunc = {l: Model(tx_len) for l, lib in enumerate(libs) if lib.feat is not None}
         res = fit_with_truncation(em, trunc, n_outer=8) if trunc else em.run()
         tpm[fit] = molar_to_tpm(res.theta[0])
         for l, m in trunc.items():
+            if isinstance(m, AnchoredTruncationModel):
+                anch.append(m.profiles().assign(fit=fit, library=libs[l].name))
+                continue
             for end, prof in [("5p", m.end5), ("3p", m.end3)]:
                 profiles.append(pd.DataFrame({"fit": fit, "library": libs[l].name, "end": end,
                                               "bin_lo": prof.edges[:-1], "bin_hi": prof.edges[1:], "p": prof.p}))
@@ -75,6 +83,7 @@ def main(bs, wtc11_dir, ref_fasta, out_dir, mm_subdir="minimap2", lr_only=False)
         print(summary[-1], flush=True)
     pd.DataFrame(tpm, index=names).to_csv(out_dir / f"{bs}_tpm.tsv.gz", sep="\t", float_format="%.6g")
     pd.concat(profiles).to_csv(out_dir / f"{bs}_trunc.tsv", sep="\t", index=False)
+    pd.concat(anch).to_csv(out_dir / f"{bs}_anch.tsv", sep="\t", index=False)
     pd.DataFrame(summary).to_csv(out_dir / f"{bs}_fits.tsv", sep="\t", index=False)
 
 

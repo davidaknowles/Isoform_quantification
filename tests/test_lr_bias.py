@@ -257,3 +257,54 @@ def test_uniform_unspliced_targets_keep_truncation_identified():
     est_u = res.theta[0][unspl].sum()
     est_ratio, true_ratio = est_u / (1 - est_u), kappa * theta[unspl].sum() / theta[~unspl].sum()
     assert abs(np.log(est_ratio / true_ratio)) < 0.15, (est_ratio, true_ratio)
+
+
+def simulate_censored(rng, n_genes=200, n_reads=40000, median_len=1200):
+    """
+    Nested isoform pairs (800-15000 bp, short = 3' part of long). Reads are
+    3'-anchored (d3 geometric, mean ~9) with molecule length R lognormal; the
+    read is full length when R exceeds the available length.
+    """
+    names, lens = [], []
+    for g in range(n_genes):
+        L = int(np.exp(rng.uniform(np.log(800), np.log(15000))))
+        names += [f"g{g}_long", f"g{g}_short"]
+        lens += [L, int(rng.uniform(0.2, 0.8) * L)]
+    lens = np.array(lens)
+    theta = rng.dirichlet(np.ones(len(names)) * 0.5)
+    tx = rng.choice(len(names), size=n_reads, p=theta)
+    R = np.exp(rng.normal(np.log(median_len), 0.8, n_reads)).astype(int) + 50
+    d3 = np.minimum(rng.geometric(0.1, n_reads) - 1, lens[tx] - 100)
+    m = lens[tx] - d3
+    d5 = np.minimum(np.where(R > m - 50, rng.integers(0, 30, n_reads), m - R), m - 50)
+    rows = []
+    for r in range(n_reads):
+        t = tx[r]
+        g = t // 2
+        L, S = lens[2 * g], lens[2 * g + 1]
+        off = 0 if t % 2 == 0 else L - S
+        s, e = d5[r] + off, lens[t] - d3[r] + off
+        rows.append((r, names[2 * g], s, e, L))
+        if s >= L - S:
+            rows.append((r, names[2 * g + 1], s - (L - S), e - (L - S), S))
+    aln = pd.DataFrame(rows, columns=["read", "tx", "tstart", "tend", "tlen"])
+    aln["AS"] = 100.0
+    return filter_alignments(aln), names, lens, theta
+
+
+def test_anchored_model_beats_independent_profiles_on_censored_lengths():
+    from joli.lr_bias import AnchoredTruncationModel, fit_bias
+    aln, names, lens, theta = simulate_censored(np.random.default_rng(1))
+    anch = AnchoredTruncationModel(lens)
+    feat = anch.features(aln.tstart, aln.tend, aln.tlen)
+    err = {}
+    for name, model in [("indep", TruncationModel(lens)), ("anch", anch)]:
+        lib = library_from_alignments("lr", aln, names, features=feat)
+        res = fit_bias(JointEM([lib]), trunc={0: model}, n_outer=10)
+        err[name] = np.abs(res.theta[0] - theta).sum()
+    assert err["anch"] < 0.7 * err["indep"], err
+    assert anch.pi[0] > 0.9                                # 3'-anchored component dominates
+    # median of the fitted read-length density near the simulated 1250
+    g = anch.g[0]
+    med = np.interp(0.5, np.r_[0.0, np.cumsum(g.p)], g.edges)
+    assert 900 < med < 1700, med

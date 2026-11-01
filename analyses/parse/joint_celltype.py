@@ -15,7 +15,8 @@ reads bring coverage, long reads bring isoform identifiability.
 
 Bias models are shared per platform x primer/kit across all of its libraries:
   SR position profile (poly(dT): distance to 3' end; hexamer: relative position)
-  LR read-end truncation (5' and 3' uncovered bases), per kit
+  LR read ends (AnchoredTruncationModel: anchored end profile and censored read length,
+  3'/5'-anchored mixture), per kit
   LR length bias with a separate unspliced scale, per kit (identifiable against
   SR, whose spliced rates are fixed)
   SR poly(dT) scale of internal priming on unspliced targets
@@ -36,8 +37,8 @@ import pandas as pd
 
 from joli.alevin import primer_rates
 from joli.joint import JointEM, molar_to_tpm
-from joli.lr_bias import (FeatureColumns, LengthBias, ReadPositionModel, StackedFeatures,
-                          TruncationModel, fit_bias)
+from joli.lr_bias import (AnchoredTruncationModel, FeatureColumns, LengthBias, ReadPositionModel,
+                          StackedFeatures, fit_bias)
 from joli.paf import read_fasta_lengths
 from joli.rad import libraries_from_molecules, load_rad_dump, molecule_alignments
 
@@ -148,7 +149,7 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
     lr_aln = lr_aln[pd.Series(lr_groups[lr_aln["cell"].to_numpy()]).isin(keep_g(lr_groups)).to_numpy()]
     sr_libs = libraries_from_molecules(sr_aln, sr_groups, names, keep_g(sr_groups), model=sr_feat)
     lr_libs = libraries_from_molecules(lr_aln, lr_groups, names, keep_g(lr_groups),
-                                       model=TruncationModel(tx_len, uniform=unspliced), platform="long")
+                                       model=AnchoredTruncationModel(tx_len, uniform=unspliced), platform="long")
     del sr_aln, lr_aln
     print(f"{len(sr_libs)} SR and {len(lr_libs)} LR libraries", flush=True)
 
@@ -166,7 +167,7 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
                         length[i] = sr_kappa
                 else:
                     # one truncation and one length model per long-read kit, created on first use
-                    trunc[i] = lr_models.setdefault(primer, TruncationModel(tx_len, uniform=unspliced))
+                    trunc[i] = lr_models.setdefault(primer, AnchoredTruncationModel(tx_len, uniform=unspliced))
                     if lr_length is not None:
                         length[i] = lr_length.setdefault(primer, LengthBias(tx_len, extra=unspliced[:, None]))
         return keys, libs, unit_of, trunc, length
@@ -198,8 +199,11 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
             for p, m in sr_models.items():
                 bias.append(pd.DataFrame({"fit": fit, "model": f"SR position {p}", "x": m.model.prof.edges[:-1], "value": m.model.prof.p}))
             for p, m in lr_models.items():
-                for end, prof in [("5p", m.end5), ("3p", m.end3)]:
-                    bias.append(pd.DataFrame({"fit": fit, "model": f"LR truncation {end} {p}", "x": prof.edges[:-1], "value": prof.p}))
+                q = m.profiles()
+                bias.append(pd.DataFrame({"fit": fit, "model": f"LR {p} " + q["anchor"] + "-anchored " + q["kind"],
+                                          "x": q["x"], "value": q["value"]}))
+                bias.append(pd.DataFrame({"fit": fit, "model": f"LR {p} unspliced read_length",
+                                          "x": m.length.edges[:-1], "value": m.length.p}))
             for p, m in (lr_length or {}).items():
                 grid = np.array([300, 500, 1000, 2000, 4000, 8000, 16000])
                 bias.append(pd.DataFrame({"fit": fit, "model": f"LR length {p}", "x": grid, "value": m.rates_at(grid)}))

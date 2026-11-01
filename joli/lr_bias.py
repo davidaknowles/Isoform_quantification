@@ -151,6 +151,158 @@ class TruncationModel:
         self.end3.mstep(np.bincount(feat[:, 1], weights=z, minlength=self.end3.J), Z, self.O3)
 
 
+class AnchoredTruncationModel:
+    """
+    Read-end model for long reads: one end anchored, the other set by a
+    censored molecule length.
+
+    A 3'-anchored read (poly(dT)-primed cDNA, truncated towards the 5' end)
+    ends d3 bases from the 3' end, d3 ~ q_a (an EndProfile normalised over
+    d3 <= L_t), and has molecule length R ~ g over the m = L_t - d3 bases
+    available. If R > m - delta the read reaches the 5' end (full length) and
+    d5 ~ e, a distribution over [0, delta); otherwise the read has length
+    r = m - d5 = R. So
+
+        P(d5, d3 | t) = q_a(d3 | L_t) [ S(m - delta) e(d5) 1{d5 < delta} + g(r) 1{d5 >= delta} ],
+
+    with g a binned density over read length (bins `len_edges`, uniform within
+    a bin) and S its survival function. Full-length fractions fall with
+    transcript length through S, which independent 5' and 3' profiles cannot
+    express (they push mass to distances only long transcripts reach). A
+    5'-anchored component (e.g. cap-trapped libraries) swaps the two ends; the
+    model is a mixture over `anchors` with weights pi, learned by default.
+
+    Features per alignment: (d5 bin, d3 bin, aligned-length bin); bins of
+    d5/d3 use `edges`, which must contain delta. Distances within a d5/d3 bin
+    enter m at the bin midpoint. Targets in `uniform` (unspliced gene spans)
+    get g_u(r) / (L_t + 1) with g_u a separate read-length density, and are
+    left out of the other updates (see TruncationModel).
+
+    M-step given expected reads z per alignment: component responsibilities;
+    pi from their totals; q_a by the truncated-multinomial fixed point; e as a
+    weighted histogram; g as the self-consistency (Turnbull) estimate of a
+    right-censored binned density, with full-length reads censored at m - delta.
+    """
+
+    def __init__(self, tx_len, anchors=("3p", "5p"), pi=None, edges=DEFAULT_EDGES, len_edges=LEN_EDGES,
+                 delta=50.0, uniform=None, learn_pi=True):
+        self.tx_len = np.asarray(tx_len, dtype=np.float64)
+        self.edges = np.asarray(edges, dtype=np.float64)
+        if delta not in self.edges:
+            raise ValueError("delta must be one of the d5/d3 bin edges")
+        self.delta = float(delta)
+        self.kf = int(np.flatnonzero(self.edges == delta)[0])       # d5/d3 bins below delta
+        self.width = np.diff(self.edges)
+        self.mid = 0.5 * (self.edges[:-1] + self.edges[1:])
+        self.anchors = tuple(anchors)
+        self.learn_pi = learn_pi
+        K = len(self.anchors)
+        self.pi = np.full(K, 1.0 / K) if pi is None else np.asarray(pi, dtype=np.float64) / np.sum(pi)
+        self.anchor = [EndProfile(self.edges) for _ in range(K)]
+        for a in self.anchor:                                       # start concentrated near the anchor
+            a.p = np.exp(-self.mid / 100.0)
+            a.p /= a.p.sum()
+        self.e = [np.full(self.kf, 1.0 / self.kf) for _ in range(K)]
+        self.g = [EndProfile(len_edges) for _ in range(K)]
+        self.O = self.anchor[0].overlap(self.tx_len)
+        self.uniform = np.zeros(len(self.tx_len), dtype=bool) if uniform is None else np.asarray(uniform, dtype=bool)
+        self.length = EndProfile(len_edges)                         # read length on uniform targets
+
+    def features(self, tstart, tend, tlen):
+        """Integer features (n, 3): bins of d5 = tstart, d3 = tlen - tend, and aligned length."""
+        tstart, tend, tlen = (np.asarray(x, dtype=np.float64) for x in (tstart, tend, tlen))
+        b = self.anchor[0]
+        return np.column_stack([b.bin(tstart), b.bin(tlen - tend), self.length.bin(tend - tstart)])
+
+    @staticmethod
+    def _survival(g, x):
+        """S(x) = P(R > x) for the binned density g (EndProfile) at points x."""
+        cdf = np.r_[0.0, np.cumsum(g.p)]
+        return np.clip(1.0 - np.interp(x, g.edges, cdf), 0.0, 1.0)
+
+    def _ends(self, feat, k):
+        """(anchor-end bin, other-end bin) of component k."""
+        return (feat[:, 1], feat[:, 0]) if self.anchors[k] == "3p" else (feat[:, 0], feat[:, 1])
+
+    def _components(self, tx, feat):
+        """(K, n) per-component densities P_k(d5, d3 | t)."""
+        jr = feat[:, 2]
+        L = self.tx_len[tx]
+        out = np.empty((len(self.anchors), len(tx)))
+        for k in range(len(self.anchors)):
+            ja, jo = self._ends(feat, k)
+            a, g = self.anchor[k], self.g[k]
+            qa = a.weight(ja, tx, a.norm(self.O))
+            full = jo < self.kf
+            jf = np.minimum(jo, self.kf - 1)
+            x = np.maximum(L - self.mid[ja] - self.delta, 0.0)
+            other = np.where(full, self._survival(g, x) * self.e[k][jf] / self.width[jf], g.p[jr] / g.width[jr])
+            out[k] = qa * other
+        return out
+
+    def weights(self, tx, feat):
+        """c (n,) for alignments to transcripts tx with features feat."""
+        w = self.pi @ self._components(tx, feat)
+        u = self.uniform[tx]
+        if u.any():
+            lb = feat[u, 2]
+            w[u] = self.length.p[lb] / self.length.width[lb] / (self.tx_len[tx[u]] + 1.0)
+        return w
+
+    def mstep(self, tx, feat, z, n_iter=200, tol=1e-10, pseudo=1e-3):
+        u = self.uniform[tx]
+        if u.any():
+            g = np.bincount(feat[u, 2], weights=z[u], minlength=self.length.J) + pseudo
+            self.length.p = g / g.sum()
+        keep = ~u & (z > 0)
+        tx, feat, z = tx[keep], feat[keep], z[keep]
+        if not len(z):
+            return
+        P = self._components(tx, feat) * self.pi[:, None]
+        rho = P / np.maximum(P.sum(0), 1e-300)
+        if self.learn_pi:
+            tot = rho @ z + pseudo
+            self.pi = tot / tot.sum()
+        T, L = len(self.tx_len), self.tx_len[tx]
+        for k in range(len(self.anchors)):
+            v = z * rho[k]
+            ja, jo = self._ends(feat, k)
+            a = self.anchor[k]
+            a.mstep(np.bincount(ja, weights=v, minlength=a.J), np.bincount(tx, weights=v, minlength=T), self.O,
+                    pseudo=pseudo)
+            full = jo < self.kf
+            e = np.bincount(jo[full], weights=v[full], minlength=self.kf) + pseudo
+            self.e[k] = e / e.sum()
+            # read lengths, right-censored at x = m - delta for full-length reads
+            g = self.g[k]
+            obs = np.bincount(feat[~full, 2], weights=v[~full], minlength=g.J)
+            x = np.maximum(L[full] - self.mid[ja[full]] - self.delta, 0.0)
+            xs, inv = np.unique(np.round(x), return_inverse=True)
+            cw = np.bincount(inv, weights=v[full], minlength=len(xs))
+            frac = np.clip((g.edges[1:][None, :] - xs[:, None]) / g.width[None, :], 0.0, 1.0)   # bin share above x
+            p = g.p.copy()
+            for _ in range(n_iter):
+                S = np.maximum(frac @ p, 1e-300)
+                new = obs + ((cw / S) @ frac) * p + pseudo
+                new /= new.sum()
+                done = np.abs(new - p).max() < tol
+                p = new
+                if done:
+                    break
+            g.p = p
+
+    def profiles(self):
+        """Long-format table of the fitted components: anchor profile, full-length end, read length, pi."""
+        import pandas as pd
+        rows = []
+        for k, end in enumerate(self.anchors):
+            rows += [pd.DataFrame({"anchor": end, "kind": "anchor", "x": self.edges[:-1], "value": self.anchor[k].p}),
+                     pd.DataFrame({"anchor": end, "kind": "full_end", "x": self.edges[:self.kf], "value": self.e[k]}),
+                     pd.DataFrame({"anchor": end, "kind": "read_length", "x": self.g[k].edges[:-1], "value": self.g[k].p}),
+                     pd.DataFrame({"anchor": end, "kind": "pi", "x": [0.0], "value": [self.pi[k]]})]
+        return pd.concat(rows, ignore_index=True)
+
+
 REL_EDGES = np.linspace(0.0, 1.0, 21)
 D3_EDGES = np.array([0, 25, 50, 100, 150, 200, 300, 400, 500, 750, 1000, 1500, 2000, 3000,
                      5000, 10000, 30000], dtype=np.float64)

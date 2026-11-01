@@ -12,6 +12,9 @@ Fits (one unit each, no prior):
                                            SR from salmon fragment alignments with a fragment-length
                                            distribution and positional coverage profile fitted jointly
                                            (FragmentModel), no salmon bias correction
+  {LR}+anch, SRfrag+{LR}+anch, SRfrag+allLR+anch
+                                           as +trunc with the anchored censored-length model
+                                           (AnchoredTruncationModel) in place of independent end profiles
 SR effective lengths are the fixed reference that makes LR length bias identifiable.
 
 Writes {out_dir}/{cell}_rep{rep}_tpm.tsv.gz, _fits.tsv and _bias.tsv.
@@ -27,7 +30,7 @@ import numpy as np
 import pandas as pd
 
 from joli.joint import JointEM, molar_to_tpm
-from joli.lr_bias import FragmentModel, LengthBias, TruncationModel, fit_bias
+from joli.lr_bias import AnchoredTruncationModel, FragmentModel, LengthBias, TruncationModel, fit_bias
 from joli.paf import filter_alignments, library_from_alignments, read_fasta_lengths, read_paf
 from joli.salmon_io import library_from_fragments, library_from_salmon, read_fragments
 
@@ -59,30 +62,34 @@ def main(cell, rep, sgnex_dir, out_dir):
             continue
         t0 = time.time()
         aln = filter_alignments(read_paf(paf), strand=strand)
-        feat = TruncationModel(tx_len).features(aln["tstart"], aln["tend"], aln["tlen"])
+        feat = AnchoredTruncationModel(tx_len).features(aln["tstart"], aln["tend"], aln["tlen"])
         lr[proto] = library_from_alignments(proto, aln, names, features=feat)
         print(f"loaded {proto}: {aln['read'].nunique()} reads ({time.time() - t0:.0f} s)", flush=True)
 
-    # (libraries, truncate LR?, length-bias LR?, fragment model for SR:frag?)
+    # (libraries, LR truncation model (False, "trunc", "anch"), length-bias LR?, fragment model for SR:frag?)
     fits = {"SR:nobias": ([sr["nobias"]], False, False, False), "SR:bias": ([sr["bias"]], False, False, False)}
     for proto, lib in lr.items():
         fits[proto] = ([lib], False, False, False)
-        fits[f"{proto}+trunc"] = ([lib], True, False, False)
-        fits[f"SR+{proto}+trunc"] = ([sr["bias"], lib], True, False, False)
-        fits[f"SR+{proto}+trunc+len"] = ([sr["bias"], lib], True, True, False)
-    fits["SR+allLR+trunc+len"] = ([sr["bias"]] + list(lr.values()), True, True, False)
+        fits[f"{proto}+trunc"] = ([lib], "trunc", False, False)
+        fits[f"{proto}+anch"] = ([lib], "anch", False, False)
+        fits[f"SR+{proto}+trunc"] = ([sr["bias"], lib], "trunc", False, False)
+        fits[f"SR+{proto}+trunc+len"] = ([sr["bias"], lib], "trunc", True, False)
+    fits["SR+allLR+trunc+len"] = ([sr["bias"]] + list(lr.values()), "trunc", True, False)
     if srf is not None:
         fits["SRfrag"] = ([srf], False, False, True)
         for proto, lib in lr.items():
-            fits[f"SRfrag+{proto}+trunc"] = ([srf, lib], True, False, True)
-        fits["SRfrag+allLR+trunc"] = ([srf] + list(lr.values()), True, False, True)
+            for kind in ["trunc", "anch"]:
+                fits[f"SRfrag+{proto}+{kind}"] = ([srf, lib], kind, False, True)
+        for kind in ["trunc", "anch"]:
+            fits[f"SRfrag+allLR+{kind}"] = ([srf] + list(lr.values()), kind, False, True)
 
     tpm, summary, bias = {}, [], []
     for fit, (libs, do_trunc, do_len, do_frag) in fits.items():
         t0 = time.time()
         em = JointEM(libs, units=[0] * len(libs))
         lr_idx = [l for l, lib in enumerate(libs) if lib.platform == "long"]
-        trunc = {l: TruncationModel(tx_len) for l in lr_idx} if do_trunc else {}
+        Model = AnchoredTruncationModel if do_trunc == "anch" else TruncationModel
+        trunc = {l: Model(tx_len) for l in lr_idx} if do_trunc else {}
         length = {l: LengthBias(tx_len) for l in lr_idx} if do_len else {}
         frag = {}
         if do_frag:
@@ -101,6 +108,11 @@ def main(cell, rep, sgnex_dir, out_dir):
             bias.append(pd.DataFrame({"fit": fit, "library": "SR:frag", "kind": "fld", "x": m.fe[:-1], "value": m.pf}))
             bias.append(pd.DataFrame({"fit": fit, "library": "SR:frag", "kind": "sr_position", "x": m.re[:-1], "value": m.pq}))
         for l, m in trunc.items():
+            if isinstance(m, AnchoredTruncationModel):
+                p = m.profiles()
+                bias.append(pd.DataFrame({"fit": fit, "library": libs[l].name, "kind": "anch_" + p["anchor"] + "_" + p["kind"],
+                                          "x": p["x"], "value": p["value"]}))
+                continue
             for end, prof in [("5p", m.end5), ("3p", m.end3)]:
                 bias.append(pd.DataFrame({"fit": fit, "library": libs[l].name, "kind": f"trunc_{end}",
                                           "x": prof.edges[:-1], "value": prof.p}))
