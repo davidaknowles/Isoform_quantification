@@ -156,6 +156,21 @@ First primer comparison (`analyses/parse/position_fit.py`, GSE246624, 5% of mole
 - Unspliced targets take 83–87% of the poly(dT) TPM but 28–31% of the hexamer TPM. With $b_t = 1$ for poly(dT) every intronic UMI counts as a whole pre-mRNA molecule, but intronic poly(dT) reads come mostly from internal priming at A-rich stretches along the gene body, at a rate that grows with length like hexamer priming. Unspliced targets need a length-proportional rate under poly(dT) as well, with a learned scale (internal priming events per base relative to one 3' priming per molecule), identifiable when poly(dT) and hexamer libraries share $\theta$. Planned as extra covariates in `LengthBias` (an unspliced indicator times log length).
 - Depth: about 15% of UMIs are spliced-informative, so a 5% subsample leaves a few spliced molecules per gene per library. The comparison needs all molecules and genes restricted by coverage.
 
+### 2026-10-31 Jointly fitted SR fragment model on SG-NEx spike-ins
+
+`FragmentModel` (fragment-length distribution and relative-start coverage profile, effective lengths from the fitted fld) on salmon fragment alignments (`--writeMappings`, 30–41M fragments per replicate), fitted jointly with the ONT cDNA libraries (truncation model on LR). Means over replicates, against the salmon-EC SR runs:
+
+| fit | SIRV-4 TV | sequins TV | sequins log-Pearson | SIRV E2 TV | SIRV E2 log-Pearson |
+|---|---|---|---|---|---|
+| dcDNA + trunc (LR alone) | 0.170 | 0.077 | 0.948 | 0.186 | 0.837 |
+| SR (salmon ECs) + dcDNA + trunc | 0.136 | 0.099 | 0.910 | 0.215 | 0.855 |
+| SR fragment model + dcDNA + trunc | 0.168 | 0.079 | 0.916 | **0.157** | 0.772 |
+| SR (salmon ECs) + PCR-cDNA + trunc | 0.134 | 0.070 | 0.914 | 0.143 | 0.856 |
+| SR fragment model + PCR-cDNA + trunc | 0.148 | 0.067 | 0.918 | 0.145 | 0.816 |
+| SR fragment model + both LR + trunc | 0.143 | **0.064** | 0.925 | **0.132** | 0.820 |
+
+With the fragment model, adding SR to direct cDNA now improves SIRV E2 isoform fractions over LR alone (0.186 → 0.157; with salmon ECs SR made them worse, 0.215), and SR + both LR protocols gives the best isoform fractions on sequins and SIRV E2. On SIRV-4 it is mixed (0.136 → 0.168 with dcDNA), and abundance accuracy drops on SIRV E2 (log-Pearson 0.855 → 0.772–0.820), probably from what the fragment model leaves out relative to salmon (sequence and GC bias, alignment-score weights) and its midpoint approximation of effective lengths.
+
 ### 2026-10-30 Parse primers on all molecules; first Parse + Kinnex cell-type fit
 
 Primer comparison on all GSE246624 molecules (65M and 59M; 2.4M poly(dT) and 1.5M hexamer molecules per median library) with the unspliced-rate fix: gene-level agreement of poly(dT)-only and hexamer-only fits rises from 0.27–0.40 (5%, old rates) to 0.70 (log-Pearson over genes > 10 TPM in both). The joint poly(dT) + hexamer fits learn log κ = −8.6 (−8.2 with position models), i.e. about 2e-4 internal-priming reads per base of pre-mRNA relative to one 3' priming per molecule, and put 43–48% of TPM on unspliced targets (hexamer alone: 32%). Isoform-level agreement stays poor: $\psi$ Pearson 0.25 → 0.32 and gene TV median 0.85 → 0.74 with the position models (major isoform 0.18 → 0.23).
