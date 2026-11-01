@@ -169,8 +169,11 @@ class AnchoredTruncationModel:
     a bin) and S its survival function. Full-length fractions fall with
     transcript length through S, which independent 5' and 3' profiles cannot
     express (they push mass to distances only long transcripts reach). A
-    5'-anchored component (e.g. cap-trapped libraries) swaps the two ends; the
-    model is a mixture over `anchors` with weights pi, learned by default.
+    5'-anchored component (e.g. cap-trapped libraries) swaps the two ends. An
+    "internal" component places reads of length r ~ g_i (truncated at L_t)
+    uniformly: P = g_i(r) / G_i(L_t) / (L_t - r + 1) (fragments, both ends
+    away from the transcript ends). The model is a mixture over `anchors` with
+    weights pi, learned by default.
 
     Features per alignment: (d5 bin, d3 bin, aligned-length bin); bins of
     d5/d3 use `edges`, which must contain delta. Distances within a d5/d3 bin
@@ -207,6 +210,7 @@ class AnchoredTruncationModel:
         self.O = self.anchor[0].overlap(self.tx_len)
         self.uniform = np.zeros(len(self.tx_len), dtype=bool) if uniform is None else np.asarray(uniform, dtype=bool)
         self.length = EndProfile(len_edges)                         # read length on uniform targets
+        self.Olen = self.length.overlap(self.tx_len)                # read-length bins that fit in L_t
 
     def features(self, tstart, tend, tlen):
         """Integer features (n, 3): bins of d5 = tstart, d3 = tlen - tend, and aligned length."""
@@ -230,8 +234,16 @@ class AnchoredTruncationModel:
         L = self.tx_len[tx]
         out = np.empty((len(self.anchors), len(tx)))
         for k in range(len(self.anchors)):
+            g = self.g[k]
+            if self.anchors[k] == "internal":
+                # mean of 1 / (L - r + 1) over r uniform in the bin's part below L
+                lo = self.length.edges[jr]
+                hi = np.maximum(np.minimum(self.length.edges[jr + 1], L), lo + 1e-9)
+                inv = np.log(np.maximum(L - lo + 1.0, 1.0) / np.maximum(L - hi + 1.0, 1.0)) / (hi - lo)
+                out[k] = g.weight(jr, tx, g.norm(self.Olen)) * np.maximum(inv, 1.0 / np.maximum(L + 1.0, 1.0))
+                continue
             ja, jo = self._ends(feat, k)
-            a, g = self.anchor[k], self.g[k]
+            a = self.anchor[k]
             qa = a.weight(ja, tx, a.norm(self.O))
             full = jo < self.kf
             jf = np.minimum(jo, self.kf - 1)
@@ -266,6 +278,11 @@ class AnchoredTruncationModel:
         T, L = len(self.tx_len), self.tx_len[tx]
         for k in range(len(self.anchors)):
             v = z * rho[k]
+            if self.anchors[k] == "internal":
+                g = self.g[k]
+                g.mstep(np.bincount(feat[:, 2], weights=v, minlength=g.J), np.bincount(tx, weights=v, minlength=T),
+                        self.Olen, pseudo=pseudo)
+                continue
             ja, jo = self._ends(feat, k)
             a = self.anchor[k]
             a.mstep(np.bincount(ja, weights=v, minlength=a.J), np.bincount(tx, weights=v, minlength=T), self.O,
@@ -291,10 +308,29 @@ class AnchoredTruncationModel:
                     break
             g.p = p
 
-    def profiles(self):
-        """Long-format table of the fitted components: anchor profile, full-length end, read length, pi."""
+    def full_length_fraction(self, lengths):
+        """P(both read ends within delta of the transcript ends | L) at the given lengths."""
+        L = np.asarray(lengths, dtype=np.float64)
+        out = np.zeros(len(L))
+        for k in range(len(self.anchors)):
+            if self.anchors[k] == "internal":
+                continue                                           # ~0 for L > delta
+            a = self.anchor[k]
+            O = a.overlap(L)[:, :self.kf]                          # anchor bins below delta
+            qa = O * a.p[:self.kf] / a.norm(a.overlap(L))[:, None]
+            S = self._survival(self.g[k], np.maximum(L[:, None] - self.mid[None, :self.kf] - self.delta, 0.0))
+            out += self.pi[k] * (qa * S).sum(1)
+        return out
+
+    def profiles(self, lengths=(500, 1000, 2000, 3000, 5000, 8000, 12000)):
+        """
+        Long-format table of the fitted components: anchor profile p (untruncated bin masses; wide
+        bins only long transcripts reach can hold much of it), full-length end, read length, pi,
+        and the predicted full-length fraction at `lengths`.
+        """
         import pandas as pd
-        rows = []
+        rows = [pd.DataFrame({"anchor": "all", "kind": "full_length_fraction", "x": np.asarray(lengths, dtype=np.float64),
+                              "value": self.full_length_fraction(lengths)})]
         for k, end in enumerate(self.anchors):
             rows += [pd.DataFrame({"anchor": end, "kind": "anchor", "x": self.edges[:-1], "value": self.anchor[k].p}),
                      pd.DataFrame({"anchor": end, "kind": "full_end", "x": self.edges[:self.kf], "value": self.e[k]}),

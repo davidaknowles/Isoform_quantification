@@ -308,3 +308,26 @@ def test_anchored_model_beats_independent_profiles_on_censored_lengths():
     g = anch.g[0]
     med = np.interp(0.5, np.r_[0.0, np.cumsum(g.p)], g.edges)
     assert 900 < med < 1700, med
+
+
+def test_anchored_full_length_fraction_matches_simulation():
+    from joli.lr_bias import AnchoredTruncationModel, fit_bias
+    aln, names, lens, theta = simulate_censored(np.random.default_rng(2))
+    m = AnchoredTruncationModel(lens, anchors=("3p",))
+    lib = library_from_alignments("lr", aln, names, features=m.features(aln.tstart, aln.tend, aln.tlen))
+    fit_bias(JointEM([lib]), trunc={0: m}, n_outer=10)
+    # simulated: d3 < 50 w.p. ~0.995, full length when R = exp(N(log 1200, 0.8)) + 50 > L - d3 - 50
+    from scipy.stats import norm
+    for L in [1000, 3000]:
+        truth = norm.sf((np.log(L - 5 - 100) - np.log(1200)) / 0.8)
+        assert abs(m.full_length_fraction([L])[0] - truth) < 0.06, (L, truth, m.full_length_fraction([L]))
+
+
+def test_anchored_internal_component_runs_and_keeps_accuracy():
+    from joli.lr_bias import AnchoredTruncationModel, fit_bias
+    aln, names, lens, theta = simulate_censored(np.random.default_rng(1))
+    m = AnchoredTruncationModel(lens, anchors=("3p", "5p", "internal"))
+    lib = library_from_alignments("lr", aln, names, features=m.features(aln.tstart, aln.tend, aln.tlen))
+    res = fit_bias(JointEM([lib]), trunc={0: m}, n_outer=10)
+    assert np.abs(res.theta[0] - theta).sum() < 0.2
+    assert m.pi[0] > 0.8
