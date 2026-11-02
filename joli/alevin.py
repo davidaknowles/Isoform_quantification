@@ -113,27 +113,30 @@ def library_from_pseudobulk(name, ec_keys, counts, transcript_names, b, platform
     return Library(name=name, tcc=tcc, b=np.asarray(b, dtype=np.float64), platform=platform)
 
 
-def primer_rates(primer, tx_len, read_len=150, unspliced=None):
+def primer_rates(primer, tx_len, read_len=150, unspliced=None, kappa=1.0):
     """
     Base sampling rate per target for a Parse RT primer.
 
     poly(dT) primes once per molecule at the poly(A) tail (rate 1), except on
     unspliced targets, whose reads come from internal priming at A-rich
     stretches along the gene body at a rate proportional to the number of
-    read starts, L - r + 1. Random hexamers prime along the molecule: L - r + 1
-    for every target. The scale of poly(dT) internal priming relative to 3'
-    priming is left to a learned covariate (LengthBias with an unspliced
-    indicator). For long reads, read_len = 0.
+    read starts, kappa (L - r + 1). Random hexamers prime along the molecule: L - r + 1
+    for every target. kappa is the internal-priming rate per base relative to
+    one 3' priming per molecule; it can be refined by a learned covariate
+    (LengthBias with an unspliced indicator) when another library fixes the
+    unspliced abundances. With kappa = 1 the molar abundance of unspliced
+    targets is understated by about 1 / kappa. For long reads, read_len = 0.
 
     Args:
         tx_len    : (T,) target lengths.
         unspliced : (T,) bool | None -- unspliced (gene-span) targets.
+        kappa     : float -- poly(dT) internal-priming rate per base.
     """
     span = np.maximum(np.asarray(tx_len, dtype=np.float64) - read_len, 0.0) + 1.0
     if primer == "poly(dT)":
         b = np.ones_like(span)
         if unspliced is not None:
-            b[np.asarray(unspliced, dtype=bool)] = span[np.asarray(unspliced, dtype=bool)]
+            b[np.asarray(unspliced, dtype=bool)] = kappa * span[np.asarray(unspliced, dtype=bool)]
         return b
     if primer == "random hexamer":
         return span

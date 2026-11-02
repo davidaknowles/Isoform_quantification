@@ -7,8 +7,10 @@ short-read recipes and the long-read labels). Libraries:
       (salmon/alevin-fry RAD positions)
   LR  one per (cell type, kit, source library) from each long-read directory:
       Kinnex Parse (kit = RT primer) and/or Kinnex 10x 3'/5' (kit = poly(dT)@3p / @5p)
-Base rates (alevin.primer_rates): poly(dT) 1 on spliced targets and L - r + 1 on
-unspliced targets (internal priming), random hexamer L - r + 1 (r = 150 for SR, 0 for LR).
+Base rates (alevin.primer_rates): poly(dT) 1 on spliced targets and kappa0 (L - r + 1) on
+unspliced targets (internal priming; kappa0 = e^-8.6, the scale learned from Parse poly(dT)
+against hexamer), random hexamer L - r + 1 (r = 150 for SR, 0 for LR). The learned unspliced
+scales are corrections to kappa0 with a weak ridge.
 Each library belongs to the unit of its cell type. Short- and long-read donors
 differ, so a unit's abundances are shared across donors and platforms: short
 reads bring coverage, long reads bring isoform identifiability.
@@ -43,6 +45,7 @@ from joli.paf import read_fasta_lengths
 from joli.rad import libraries_from_molecules, load_rad_dump, molecule_alignments
 
 SR_READ_LEN = 150
+KAPPA0 = np.exp(-8.6)       # poly(dT) internal priming per base (Parse dT + hexamer joint fits)
 PRIMERS = ("poly(dT)", "random hexamer")
 
 
@@ -143,7 +146,7 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
                                ReadPositionModel(tx_len, SR_READ_LEN, "relative", uniform=unspliced)])
     def rate(g):
         plat, kit = g.split("|")[1:3]
-        return primer_rates(kit.split("@")[0], tx_len, SR_READ_LEN if plat == "SR" else 0, unspliced)
+        return primer_rates(kit.split("@")[0], tx_len, SR_READ_LEN if plat == "SR" else 0, unspliced, kappa=KAPPA0)
     keep_g = lambda gs: {g: rate(g) for g in set(x for x in gs if x is not None) if g.split("|")[0] in unit_idx}
     sr_aln = sr_aln[pd.Series(sr_groups[sr_aln["cell"].to_numpy()]).isin(keep_g(sr_groups)).to_numpy()]
     lr_aln = lr_aln[pd.Series(lr_groups[lr_aln["cell"].to_numpy()]).isin(keep_g(lr_groups)).to_numpy()]
@@ -169,7 +172,7 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
                     # one truncation and one length model per long-read kit, created on first use
                     trunc[i] = lr_models.setdefault(primer, AnchoredTruncationModel(tx_len, uniform=unspliced))
                     if lr_length is not None:
-                        length[i] = lr_length.setdefault(primer, LengthBias(tx_len, extra=unspliced[:, None]))
+                        length[i] = lr_length.setdefault(primer, LengthBias(tx_len, extra=unspliced[:, None], ridge_extra=1e-3))
         return keys, libs, unit_of, trunc, length
 
     # LR alone (with truncation) is the baseline; SR alone cannot identify isoforms, so it is not fitted
@@ -207,6 +210,7 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
             for p, m in (lr_length or {}).items():
                 grid = np.array([300, 500, 1000, 2000, 4000, 8000, 16000])
                 bias.append(pd.DataFrame({"fit": fit, "model": f"LR length {p}", "x": grid, "value": m.rates_at(grid)}))
+                bias.append(pd.DataFrame({"fit": fit, "model": f"LR log unspliced scale {p}", "x": [0.0], "value": [m.w[-1]]}))
         summary.append({"fit": fit, "n_libraries": len(libs), "units": len(present), "loglik": res.loglik[-1],
                         "sr_log_kappa_unspliced": float(sr_kappa.w[0]) if sr_kappa is not None else np.nan,
                         "n_iter": res.n_iter, "seconds": round(time.time() - t0, 1)})

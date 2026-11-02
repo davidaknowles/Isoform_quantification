@@ -496,9 +496,12 @@ class LengthBias:
         knots        : hinge positions of the log-length basis.
         extra        : (T, P2) | None -- extra covariates appended to the basis.
         length_terms : bool -- include the log-length basis.
+        ridge_extra  : float | None -- ridge on the extra covariates (default `ridge`), e.g. small
+                       for a scale that the base rates only set roughly.
     """
 
-    def __init__(self, tx_len, knots=(500, 1000, 2000, 4000, 8000), ridge=1.0, extra=None, length_terms=True):
+    def __init__(self, tx_len, knots=(500, 1000, 2000, 4000, 8000), ridge=1.0, extra=None, length_terms=True,
+                 ridge_extra=None):
         self.knots = tuple(knots)
         self.length_terms = length_terms
         cols = [self._basis(tx_len)] if length_terms else []
@@ -508,7 +511,10 @@ class LengthBias:
         self.center = X.mean(axis=0)
         self.X = X - self.center
         self.w = np.zeros(self.X.shape[1])
-        self.ridge = ridge
+        P1 = self._basis(np.asarray(tx_len)[:1]).shape[1] if length_terms else 0
+        self.ridge = np.full(self.X.shape[1], float(ridge))
+        if ridge_extra is not None:
+            self.ridge[P1:] = ridge_extra
 
     def _basis(self, lengths):
         logL = np.log(np.maximum(np.asarray(lengths, dtype=np.float64), 1.0))
@@ -541,7 +547,7 @@ class LengthBias:
 
         def objective(w):
             eta = self.X @ w
-            f = XZ @ w - 0.5 * self.ridge * w @ w
+            f = XZ @ w - 0.5 * (self.ridge * w) @ w
             for N, lm in zip(Ns, logmus):
                 a = lm + eta
                 amax = a.max()
@@ -552,7 +558,7 @@ class LengthBias:
         for _ in range(n_newton):
             eta = self.X @ self.w
             grad = XZ - self.ridge * self.w
-            H = self.ridge * np.eye(P)
+            H = np.diag(self.ridge)
             for N, lm in zip(Ns, logmus):
                 a = lm + eta
                 p = np.exp(a - a.max())
