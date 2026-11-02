@@ -207,6 +207,17 @@ Result (same subsample, 76 SR + 139 LR libraries, 21 units): joint log-likelihoo
 
 The theta rule (no theta above 1e-8 changing by > 1%) let the joint Parse + Kinnex fit run to the 5,000-step cap while the log posterior had settled: theta drifts along nearly flat directions. `JointEM.run(ll_rel_tol=)` also stops when an iterate raises the log posterior by less than `ll_rel_tol` × |log posterior|; the joint script uses 1e-10 (< 0.1 nat per iterate at |ll| ≈ 1e9), a 20,000-step cap, and starts the bias-model fit from the joint_plain solution. Same data and models: wall time 64 → 35 min (16 cores), final fits LR 2,437 → 118 steps and joint 1,669–5,002 → 157 steps, all converged; final joint log-likelihood 49 nats below the 5,000-step run (of 1.1e9). Against that run, TPM TV per cell type has mean 0.0009 and max 0.006, log-Pearson over transcripts > 1 TPM 0.99.
 
+### 2026-11-02 Scaling the joint fit to all molecules
+
+Profile of the 5% fit (20–50M EC positions, L = 215 libraries, K = 21 one-hot units, T ≈ 250k): EM dominates (bias M-steps and weight updates < 3%), and per MM step the dense (L, T) work (π θ products and fresh 430 MB temporaries) cost more than the Rust kernels. Changes and measurements (16 threads, real Kinnex + Parse libraries unless noted):
+- One-hot π path: library rows of G and the rate matrix grouped by unit, B by per-unit matrix-vector products, Z and D by slice sums; `_estep` 504 → 360 ms on the synthetic 20M-position benchmark.
+- ECs ordered by smallest transcript index in `_FlatLibrary` (isoforms of a gene have adjacent indices, so consecutive ECs touch nearby entries of μ and g): kernel 12.9 → 5.0 ns per position on one thread; all 70 libraries (50M positions) 115 → 79 ms; MM step 224 → 165 ms.
+- Library dispatch: libraries above 2/threads of all positions are split over all threads (EC blocks with per-thread accumulators), the rest run in a pool largest first: 66 ms against 102 ms with every library on one thread. Kernel scaling is 5.8× at 8 threads and flat to 16.
+- Memory: `FlatECs` stores per-EC transcripts, features (int8) and weights flat, and `_FlatLibrary` gathers from them without per-EC Python objects. The joint script builds libraries one RAD dump or one long-read source library at a time; the old loader held all ~2.4B long-read alignments in one table.
+- EC construction: no sort when a read's alignments are contiguous (the set hash is order-independent), and a 64-bit factorize with a 128-bit consistency check in place of a 3-column groupby: per 48M alignments 24 → ~9 s. One full 10x library (K3e, 53M molecules) collapses to 8.2M ECs in 74 s including file reads.
+
+Extrapolated full data: ~500M positions (~22 GB in JointEM), ~1 s per MM step.
+
 ### 2026-10-28 Rust E-step kernels
 
 `rust/joli_kernels` (C ABI, ctypes, no dependencies) implements the E-step over one library's flat EC layout; `JointEM(backend="auto")` uses it when built, numpy otherwise, and tests check agreement to 1e-10. On a dedicated node one E-step takes 6.8 ms against numpy's 13.1 ms (1.2M positions) and 13.7 against 23.0 ms (2.4M); the simulated SR+LR fit drops from 8.2 to 6.0 s. Splitting one library over threads loses at these sizes (a two-pass gather doubles memory traffic, and thread start-up and cold caches cost more than a 7–14 ms call), so libraries run concurrently in a thread pool (ctypes releases the GIL) and the two-pass kernel is used only from 5M positions per thread.
