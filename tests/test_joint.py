@@ -126,3 +126,29 @@ def test_squarem_reaches_plain_em_optimum(toy):
     assert fast.loglik[-1] >= plain.loglik[-1] - 1e-3
     big = plain.theta[0] > 1e-4
     np.testing.assert_allclose(fast.theta[0][big], plain.theta[0][big], rtol=1e-2)
+
+
+def test_onehot_estep_matches_dense():
+    from joli.joint import JointEM, Library
+    from joli.load_tcc import TCCData, FlatECs
+    rng = np.random.default_rng(3)
+    T, L = 300, 7
+    names = [f"t{i}" for i in range(T)]
+    libs = []
+    for l in range(L):
+        sizes = rng.integers(1, 5, size=200)
+        ptr = np.r_[0, np.cumsum(sizes)]
+        tcc = TCCData(ec_counts=rng.integers(1, 9, 200).astype(float),
+                      ec_transcripts=FlatECs(ptr, rng.integers(0, T, ptr[-1]).astype(np.int32)),
+                      transcript_names=names, total_reads=0, n_targets=T, sample_dir="")
+        libs.append(Library(f"l{l}", tcc, b=rng.uniform(0.5, 2, T), c=FlatECs(ptr, rng.uniform(0.1, 1, ptr[-1]))))
+    units = [2, 0, 1, 2, 0, 2, 1]
+    fast = JointEM(libs, units=units)
+    dense = JointEM(libs, units=units)
+    dense._unit_of, dense._row = None, np.arange(L)
+    theta = rng.dirichlet(np.ones(fast.T), size=3)
+    a, b = fast._estep(theta, expected_reads=True), dense._estep(theta, expected_reads=True)
+    for x, y in [(a[0], b[0]), (a[1], b[1]), (a[3], b[3])]:
+        np.testing.assert_allclose(x, y, rtol=1e-12)
+    assert abs(a[2] - b[2]) < 1e-8 * abs(b[2])
+    np.testing.assert_allclose(fast.run().theta, dense.run().theta, atol=1e-10)

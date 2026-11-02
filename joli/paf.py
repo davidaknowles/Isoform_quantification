@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 
 from .joint import Library
-from .load_tcc import TCCData
+from .load_tcc import FlatECs, TCCData
 
 PAF_COLS = ["read", "qlen", "qstart", "qend", "strand", "tx", "tlen", "tstart", "tend",
             "nmatch", "alen", "mapq"]
@@ -126,11 +126,28 @@ def _set_ids(tx, F, starts):
         h1 = np.add.reduceat(_splitmix(v, _MIX[0]), starts)
         h2 = np.add.reduceat(_splitmix(v, _MIX[1]), starts)
     n = np.diff(np.r_[starts, len(tx)]).astype(np.uint64)
-    key = pd.DataFrame({"a": h1, "b": h2, "n": n})
-    ec_id = key.groupby(["a", "b", "n"], sort=False).ngroup().to_numpy()
+    # factorize a combined 64-bit key; fall back to the 128-bit groupby if it merged distinct keys
+    with np.errstate(over="ignore"):
+        ec_id, uniq = pd.factorize(h1 ^ (h2 * np.uint64(0x9E3779B97F4A7C15)) ^ (n << np.uint64(40)))
+    rep = np.zeros(len(uniq), dtype=np.int64)
+    rep[ec_id[::-1]] = np.arange(len(ec_id))[::-1]
+    if not ((h1 == h1[rep][ec_id]).all() and (h2 == h2[rep][ec_id]).all() and (n == n[rep][ec_id]).all()):
+        key = pd.DataFrame({"a": h1, "b": h2, "n": n})
+        ec_id = key.groupby(["a", "b", "n"], sort=False).ngroup().to_numpy()
     first = np.full(ec_id.max() + 1 if len(ec_id) else 0, -1, dtype=np.int64)
     first[ec_id[::-1]] = np.arange(len(ec_id))[::-1]
     return ec_id, first
+
+
+def feature_dtype(F):
+    """Smallest signed integer dtype holding the feature values (bin indices)."""
+    if not len(F):
+        return np.int16
+    lo, hi = int(F.min()), int(F.max())
+    for dt in (np.int8, np.int16, np.int32):
+        if np.iinfo(dt).min <= lo and hi <= np.iinfo(dt).max:
+            return dt
+    return np.int64
 
 
 def library_from_alignments(name, aln, transcript_names, weight=None, features=None,
@@ -167,10 +184,13 @@ def library_from_alignments(name, aln, transcript_names, weight=None, features=N
     w = np.ones(len(tx)) if weight is None else np.asarray(weight, dtype=np.float64)[keep]
     F = None if features is None else np.asarray(features, dtype=np.int64).reshape(len(aln), -1)[keep]
 
-    order = np.lexsort((tx, read))
-    read, tx, w = read[order], tx[order], w[order]
-    if F is not None:
-        F = F[order]
+    # group alignments by read (the EC key is order-independent within a read, so no sort when
+    # each read's alignments are already contiguous, e.g. in aligner output order)
+    if len(read) > 1 and not (read[1:] >= read[:-1]).all():
+        order = np.argsort(read, kind="stable")
+        read, tx, w = read[order], tx[order], w[order]
+        if F is not None:
+            F = F[order]
     starts = np.flatnonzero(np.r_[True, read[1:] != read[:-1]])
     sizes = np.diff(np.r_[starts, len(read)])
     w_norm = w / np.repeat(np.add.reduceat(w, starts), sizes)
@@ -179,18 +199,21 @@ def library_from_alignments(name, aln, transcript_names, weight=None, features=N
     ec_id, first_read = _set_ids(tx, F, starts)
     E = len(first_read)
     counts = np.bincount(ec_id, minlength=E).astype(np.float64)
+    # flat layout: EC e holds the alignments of its first read
     first = first_read
-    ec_tx = [tx[starts[e]:starts[e] + sizes[e]] for e in first]
-    feat = None if F is None else [F[starts[e]:starts[e] + sizes[e]] for e in first]
+    ec_size = sizes[first]
+    ec_off = np.r_[0, np.cumsum(ec_size)]
+    src = np.repeat(starts[first] - ec_off[:-1], ec_size) + np.arange(ec_off[-1])
+    ec_tx = FlatECs(ec_off, tx[src].astype(np.int32))
+    feat = None if F is None else FlatECs(ec_off, F[src].astype(feature_dtype(F)))
     c = None
     if weight is not None:
         # mean normalised weight per (EC, position within EC)
         pos_in_read = np.arange(len(tx)) - np.repeat(starts, sizes)
-        ec_off = np.r_[0, np.cumsum(sizes[first])]
         flat = ec_off[np.repeat(ec_id, sizes)] + pos_in_read
         csum = np.bincount(flat, weights=w_norm, minlength=ec_off[-1])
-        csum /= np.repeat(counts, sizes[first])
-        c = [csum[ec_off[e]:ec_off[e + 1]] for e in range(E)]
+        csum /= np.repeat(counts, ec_size)
+        c = FlatECs(ec_off, csum)
 
     tcc = TCCData(ec_counts=counts, ec_transcripts=ec_tx, transcript_names=list(transcript_names),
                   total_reads=int(counts.sum()), n_targets=len(transcript_names), sample_dir=name)

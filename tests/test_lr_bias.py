@@ -341,3 +341,16 @@ def test_loglik_stopping_rule_stops_earlier_with_same_fit():
     assert fast.converged and fast.n_iter < full.n_iter, (fast.n_iter, full.n_iter)
     assert 0.5 * np.abs(fast.theta[0] - full.theta[0]).sum() < 0.01
     assert full.loglik[-1] - fast.loglik[-1] < 1e-6 * abs(full.loglik[-1])
+
+
+def test_ec_construction_independent_of_alignment_order():
+    from joli.lr_bias import AnchoredTruncationModel
+    aln, names, lens, theta = simulate_censored(np.random.default_rng(6), n_reads=5000)
+    m = AnchoredTruncationModel(lens)
+    def summary(a):
+        lib = library_from_alignments("x", a, names, features=m.features(a.tstart, a.tend, a.tlen))
+        keys = [(tuple(sorted(zip(t.tolist(), map(tuple, f.tolist())))), n)
+                for t, f, n in zip(lib.tcc.ec_transcripts, lib.feat, lib.tcc.ec_counts)]
+        return sorted(keys)
+    shuffled = aln.sample(frac=1.0, random_state=1)
+    assert summary(aln) == summary(shuffled)

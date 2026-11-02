@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .load_tcc import TCCData
+from .load_tcc import FlatECs, TCCData
 
 TOLERANCE = np.finfo(np.float64).tiny
 
@@ -72,18 +72,42 @@ class Library:
 class _FlatLibrary:
     """Flat (EC, transcript) arrays of one library for vectorised E-steps."""
 
-    def __init__(self, lib: Library):
+    def __init__(self, lib: Library, sort_ecs=False):
         counts = np.asarray(lib.tcc.ec_counts, dtype=np.float64)
         keep = np.flatnonzero(counts > 0)
-        sizes = np.array([len(lib.tcc.ec_transcripts[e]) for e in keep], dtype=np.int64)
-        self.tx = np.concatenate([np.asarray(lib.tcc.ec_transcripts[e], dtype=np.int64) for e in keep])
-        self.ec = np.repeat(np.arange(len(keep), dtype=np.int64), sizes)
-        if lib.c is None:
-            self.c = np.ones(len(self.tx), dtype=np.float64)
+        ecs = lib.tcc.ec_transcripts
+        if isinstance(ecs, FlatECs):
+            # flat input: gather the kept ECs' positions without per-EC Python objects
+            sizes = np.diff(ecs.ptr)[keep]
+            off = np.r_[0, np.cumsum(sizes)]
+            src = np.repeat(ecs.ptr[keep] - off[:-1], sizes) + np.arange(off[-1])
+            if len(keep) == len(counts):
+                src = slice(None)
+            self.tx = np.asarray(ecs.values[src], dtype=np.int64)
+            self.c = np.ones(len(self.tx)) if lib.c is None else np.asarray(lib.c.values[src], dtype=np.float64)
+            self.feat = None if lib.feat is None else np.asarray(lib.feat.values[src]).reshape(len(self.tx), -1)
         else:
-            self.c = np.concatenate([np.asarray(lib.c[e], dtype=np.float64) for e in keep])
-        self.feat = None if lib.feat is None else \
-            np.concatenate([np.asarray(lib.feat[e]).reshape(sizes[i], -1) for i, e in enumerate(keep)])
+            sizes = np.array([len(ecs[e]) for e in keep], dtype=np.int64)
+            self.tx = np.concatenate([np.asarray(ecs[e], dtype=np.int64) for e in keep])
+            if lib.c is None:
+                self.c = np.ones(len(self.tx), dtype=np.float64)
+            else:
+                self.c = np.concatenate([np.asarray(lib.c[e], dtype=np.float64) for e in keep])
+            self.feat = None if lib.feat is None else \
+                np.concatenate([np.asarray(lib.feat[e]).reshape(sizes[i], -1) for i, e in enumerate(keep)])
+        if sort_ecs and len(keep) > 1:
+            # order ECs by their smallest transcript index: neighbouring ECs then touch nearby entries
+            # of mu and g in the E-step (isoforms of a gene have adjacent indices)
+            off = np.r_[0, np.cumsum(sizes)]
+            order = np.argsort(np.minimum.reduceat(self.tx, off[:-1]), kind="stable")
+            sizes = sizes[order]
+            new_off = np.r_[0, np.cumsum(sizes)]
+            src = np.repeat(off[:-1][order] - new_off[:-1], sizes) + np.arange(new_off[-1])
+            self.tx, self.c = self.tx[src], self.c[src]
+            if self.feat is not None:
+                self.feat = self.feat[src]
+            keep = keep[order]
+        self.ec = np.repeat(np.arange(len(keep), dtype=np.int64), sizes)
         self.keep = keep                     # flat EC i is lib.tcc EC keep[i]
         self.ec_ptr = np.r_[0, np.cumsum(sizes)].astype(np.int64)   # EC i spans ec_ptr[i]:ec_ptr[i+1]
         self.counts = counts[keep]
@@ -117,19 +141,22 @@ class JointEM:
                     None means each library is its own unit (K = L).
         units     : list[int] | None -- shorthand for one-hot pi: units[l] = k.
         unit_names: list[str] | None
+        sort_ecs  : bool -- store each library's ECs ordered by smallest transcript index (memory
+                    locality in the E-step; fits are unchanged).
         backend   : "auto" | "numpy" | "rust" -- E-step implementation; "auto" uses the
                     compiled kernels (joli.native, rust/joli_kernels) when built.
         threads   : int | None -- threads for the compiled kernels.
     """
 
-    def __init__(self, libraries, pi=None, units=None, unit_names=None, backend="auto", threads=None):
+    def __init__(self, libraries, pi=None, units=None, unit_names=None, backend="auto", threads=None,
+                 sort_ecs=True):
         from . import native
         if backend == "auto":
             backend = "rust" if native.available() else "numpy"
         if backend == "rust" and not native.available():
             raise RuntimeError("rust backend requested but rust/joli_kernels is not built")
         self.backend, self.threads = backend, threads
-        self.libs = [_FlatLibrary(l) for l in libraries]
+        self.libs = [_FlatLibrary(l, sort_ecs=sort_ecs) for l in libraries]
         self.L = len(self.libs)
         self.T_full = len(libraries[0].tcc.transcript_names)
         self.transcript_names = libraries[0].tcc.transcript_names
@@ -163,8 +190,22 @@ class JointEM:
             seen[fl.txc] = True
             self.active[self.pi[l] > 0] |= seen
         self._activef = self.active.astype(np.float64)
+        # one-hot pi (each library from one unit): E-step accumulation without (L, T) temporaries
+        nz = self.pi > 0
+        self._unit_of = np.argmax(self.pi, axis=1) if (nz.sum(axis=1) == 1).all() and \
+            np.allclose(self.pi[nz], 1.0) else None
+        # rows of G and the stacked rates: library order, or grouped by unit for one-hot pi so that
+        # each unit's libraries are a contiguous slice (_unit_rows[k] = (start, stop))
+        if self._unit_of is None:
+            self._row = np.arange(self.L)
+        else:
+            order = np.argsort(self._unit_of, kind="stable")
+            self._row = np.empty(self.L, dtype=np.int64)
+            self._row[order] = np.arange(self.L)
+            bounds = np.searchsorted(self._unit_of[order], np.arange(self.K + 1))
+            self._unit_rows = [(int(bounds[k]), int(bounds[k + 1])) for k in range(self.K)]
         self._Bmat = None                     # stacked compact rates (L, T), rebuilt after set_bias
-        self._G = np.empty((self.L, self.T))  # per-library gradients g_l (L, T)
+        self._G = np.empty((self.L, self.T))  # per-library gradients g_l (L, T), row self._row[l]
         self._N = np.array([fl.N for fl in self.libs])
 
     def _compact(self, x):
@@ -182,13 +223,13 @@ class JointEM:
         fl = self.libs[l]
         if self.backend == "rust":
             from . import native
-            if threads > 1:
+            if threads > 1 and getattr(self, "split_kernel", "blocks") == "gather":
                 if getattr(fl, "gather", None) is None:
                     fl.gather = native.gather_index(fl.txc, fl.ec, self.T)
                 if getattr(fl, "c_sorted", None) is None:      # reset by set_bias
                     fl.c_sorted = np.ascontiguousarray(fl.c[fl.gather[1]])
                 return native.estep(fl.ec_ptr, fl.txc, fl.c, fl.counts, mu, threads, fl.gather, fl.c_sorted, out=out)
-            return native.estep(fl.ec_ptr, fl.txc, fl.c, fl.counts, mu, 1, out=out)
+            return native.estep(fl.ec_ptr, fl.txc, fl.c, fl.counts, mu, threads, out=out)
         w = mu[fl.txc] * fl.c                                   # per position
         denom = np.bincount(fl.ec, weights=w, minlength=fl.n_ec)
         ok = denom > TOLERANCE
@@ -200,36 +241,88 @@ class JointEM:
             g = out
         return g, float(fl.counts[ok] @ np.log(denom[ok]))
 
+    def _library_esteps(self, mu_of):
+        """
+        Per-library E-steps into self._G; returns the log-likelihood terms. With the rust backend and
+        several threads, libraries holding more than big_fraction / threads of all positions run one at a
+        time split over all threads (EC blocks, per-thread accumulators; split_kernel = "gather" uses the
+        two-pass kernel instead), and the rest concurrently in a thread pool, largest first. On real
+        Kinnex + Parse libraries (50M positions, 16 threads) big_fraction 2 was fastest.
+        """
+        threads = 1
+        if self.backend == "rust":
+            from . import native
+            threads = self.threads or native.default_threads()
+        G, sizes = self._G, [len(fl.tx) for fl in self.libs]
+        total = sum(sizes)
+        lls = [0.0] * self.L
+        if threads == 1 or total < 1_000_000:
+            for l in range(self.L):
+                lls[l] = self._library_estep(l, mu_of(l), min(threads, max(1, sizes[l] // 5_000_000)),
+                                             out=G[self._row[l]])[1]
+            return lls
+        frac = getattr(self, "big_fraction", 2.0)       # libraries above frac / threads of all positions
+        big = [l for l in range(self.L) if sizes[l] > frac * total / threads and sizes[l] >= 2_000_000]
+        for l in big:
+            lls[l] = self._library_estep(l, mu_of(l), threads, out=G[self._row[l]])[1]
+        rest = sorted(set(range(self.L)) - set(big), key=lambda l: -sizes[l])
+        if rest:
+            if getattr(self, "_pool", None) is None:
+                from concurrent.futures import ThreadPoolExecutor
+                self._pool = ThreadPoolExecutor(max_workers=threads)
+            run = lambda l: self._library_estep(l, mu_of(l), 1, out=G[self._row[l]])[1]
+            for l, ll in zip(rest, self._pool.map(run, rest)):
+                lls[l] = ll
+        return lls
+
     def _estep(self, theta, expected_reads=False):
         """
         For compact theta (K, T): Z (K, T), D (K, T), loglik, and expected reads
         per library (L, T, compact) if requested (else None). With the rust
         backend and several threads, libraries run concurrently (ctypes releases
-        the GIL); a single library is split across threads only from 5M
-        positions per thread. Accumulation over libraries uses two matrix products,
-        Z = theta * (pi^T G) and D = (pi * N / B)^T Bmat.
+        the GIL; see _library_esteps). Accumulation over libraries uses two matrix
+        products, Z = theta * (pi^T G) and D = (pi * N / B)^T Bmat, or per-unit
+        slice sums for one-hot pi (_estep_onehot).
         """
         if self._Bmat is None:
-            self._Bmat = np.stack([fl.bc for fl in self.libs])
+            self._Bmat = np.empty((self.L, self.T))
+            for l, fl in enumerate(self.libs):
+                self._Bmat[self._row[l]] = fl.bc
+        if self._unit_of is not None:
+            return self._estep_onehot(theta, expected_reads)
         mus = self.pi @ theta                                    # (L, T)
-        threads = 1
-        if self.backend == "rust":
-            from . import native
-            threads = self.threads or native.default_threads()
         G = self._G
-        if threads > 1 and self.L > 1 and sum(len(fl.tx) for fl in self.libs) >= 1_000_000:
-            if getattr(self, "_pool", None) is None:
-                from concurrent.futures import ThreadPoolExecutor
-                self._pool = ThreadPoolExecutor(max_workers=threads)
-            lls = list(self._pool.map(lambda l: self._library_estep(l, mus[l], 1, out=G[l])[1], range(self.L)))
-        else:
-            lls = [self._library_estep(l, mus[l], min(threads, max(1, len(fl.tx) // 5_000_000)), out=G[l])[1]
-                   for l, fl in enumerate(self.libs)]
+        lls = self._library_esteps(lambda l: mus[l])
         B = np.einsum("lt,lt->l", mus, self._Bmat)
         loglik = float(np.sum(lls) - self._N @ np.log(B))
         Z = theta * (self.pi.T @ G)
         D = (self.pi * (self._N / B)[:, None]).T @ self._Bmat
         R = mus * G if expected_reads else None
+        return Z, D, loglik, R
+
+    def _estep_onehot(self, theta, expected_reads):
+        """_estep for one-hot pi: mu_l is a row of theta, and Z, D are sums over each unit's libraries."""
+        uo = self._unit_of
+        G = self._G
+        lls = self._library_esteps(lambda l: theta[uo[l]])
+        Bm, rows = self._Bmat, self._row
+        Bs = np.empty(self.L)                        # B in row order
+        Z = np.empty_like(theta)
+        D = np.empty_like(theta)
+        for k, (a, b) in enumerate(self._unit_rows):
+            Bs[a:b] = Bm[a:b] @ theta[k]
+        B = Bs[rows]
+        loglik = float(np.sum(lls) - self._N @ np.log(B))
+        ws = np.empty(self.L)
+        ws[rows] = self._N / B
+        for k, (a, b) in enumerate(self._unit_rows):
+            if b > a:
+                np.multiply(theta[k], np.add.reduce(G[a:b], axis=0), out=Z[k])
+                D[k] = ws[a:b] @ Bm[a:b]
+            else:
+                Z[k] = 0.0
+                D[k] = 0.0
+        R = theta[uo] * G[rows] if expected_reads else None
         return Z, D, loglik, R
 
     def position_counts(self, theta, l):

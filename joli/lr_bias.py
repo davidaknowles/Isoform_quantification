@@ -658,9 +658,13 @@ def fit_bias(em, trunc=None, length=None, frag=None, n_outer=10, run_kw=None, ve
     # intermediate fits only need to move theta towards the optimum for the next bias update;
     # the final fit (after the last bias update) runs to convergence
     inner_kw = dict(run_kw, max_iter=min(run_kw.get("max_iter", 5000), inner_max_iter))
+    import time
+    t0 = time.time()
     apply()
     res = em.run(init_theta=init_theta, **inner_kw)
+    t_run, t_m, t_apply = time.time() - t0, 0.0, 0.0
     for it in range(n_outer):
+        t0 = time.time()
         # one M-step per model object, pooling the libraries that share it
         for model, ls in _by_model(trunc).items():
             fls = [em.libs[l] for l in ls]
@@ -678,12 +682,18 @@ def fit_bias(em, trunc=None, length=None, frag=None, n_outer=10, run_kw=None, ve
                 ks = np.flatnonzero(em.pi[l] > 0)
                 mus.append((em.pi[l, ks] @ res.theta[ks]) * base_b[l])
             model.mstep([res.expected_reads[l] for l in ls], mus)
+        t1 = time.time()
         apply()
+        t2 = time.time()
         # floor so transcripts zeroed by the previous run's final round can return
         kw = run_kw if it == n_outer - 1 else inner_kw
         res = em.run(init_theta=np.maximum(res.theta, 1e-10), **kw)
+        t_m += t1 - t0
+        t_apply += t2 - t1
+        t_run += time.time() - t2
         if verbose:
-            print(f"[bias] outer {it + 1}: loglik={res.loglik[-1]:.6e} n_iter={res.n_iter}", flush=True)
+            print(f"[bias] outer {it + 1}: loglik={res.loglik[-1]:.6e} n_iter={res.n_iter} "
+                  f"(cumulative s: EM {t_run:.0f}, M-steps {t_m:.0f}, weights {t_apply:.0f})", flush=True)
     return res
 
 

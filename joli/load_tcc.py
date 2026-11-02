@@ -33,6 +33,31 @@ from scipy.io import mmread
 # Data container
 # ============================================================
 
+class FlatECs:
+    """
+    Per-EC arrays stored flat: EC e is values[ptr[e]:ptr[e + 1]] (rows of a 2-D
+    values array for features). Indexes like a list of arrays, so code written
+    for list[list[int]] works, while JointEM uses ptr and values directly
+    (no per-EC Python objects for libraries with millions of ECs).
+    """
+
+    def __init__(self, ptr, values):
+        self.ptr = np.asarray(ptr, dtype=np.int64)
+        self.values = values
+
+    def __len__(self):
+        return len(self.ptr) - 1
+
+    def __getitem__(self, e):
+        if isinstance(e, slice):
+            return [self[i] for i in range(*e.indices(len(self)))]
+        return self.values[self.ptr[e]:self.ptr[e + 1]]
+
+    def __iter__(self):
+        for e in range(len(self)):
+            yield self[e]
+
+
 @dataclass
 class TCCData:
     """
