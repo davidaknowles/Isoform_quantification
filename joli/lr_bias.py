@@ -610,7 +610,8 @@ class StackedFeatures:
         return np.column_stack([m.features(start, end, tlen) for m in self.models])
 
 
-def fit_bias(em, trunc=None, length=None, frag=None, n_outer=10, run_kw=None, verbose=False, inner_max_iter=500):
+def fit_bias(em, trunc=None, length=None, frag=None, n_outer=10, run_kw=None, verbose=False, inner_max_iter=500,
+             init_theta=None):
     """
     Alternate JointEM runs (warm-started) with bias-model M-steps.
 
@@ -627,6 +628,7 @@ def fit_bias(em, trunc=None, length=None, frag=None, n_outer=10, run_kw=None, ve
                  and b (effective length under fld); the library's base b is not used.
         n_outer: number of outer iterations.
         inner_max_iter : MM-step cap for the fits between bias updates (the final fit uses run_kw).
+        init_theta : (K, T) | None -- warm start of the first fit (e.g. from a fit without bias models).
     Returns:
         JointResult of the final run; models are updated in place.
     """
@@ -657,7 +659,7 @@ def fit_bias(em, trunc=None, length=None, frag=None, n_outer=10, run_kw=None, ve
     # the final fit (after the last bias update) runs to convergence
     inner_kw = dict(run_kw, max_iter=min(run_kw.get("max_iter", 5000), inner_max_iter))
     apply()
-    res = em.run(**inner_kw)
+    res = em.run(init_theta=init_theta, **inner_kw)
     for it in range(n_outer):
         # one M-step per model object, pooling the libraries that share it
         for model, ls in _by_model(trunc).items():

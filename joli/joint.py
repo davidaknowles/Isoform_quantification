@@ -279,7 +279,7 @@ class JointEM:
 
     def run(self, prior=None, init_theta=None, max_iter=5000, min_iter=20,
             rel_tol=1e-2, theta_floor=1e-8, accelerate=True, zero_below=0.01,
-            verbose=False) -> JointResult:
+            ll_rel_tol=None, verbose=False) -> JointResult:
         """
         Iterate until no monitored theta (> theta_floor) changes by more than
         rel_tol relatively between successive iterates (kallisto's rule; its
@@ -299,6 +299,9 @@ class JointEM:
             prior      : np.ndarray (T,) or (K, T) | None -- Dirichlet pseudo-counts a (full length).
             init_theta : np.ndarray (K, T) | None -- warm start (full length); uniform over active otherwise.
             zero_below : float | None -- expected-read threshold for final zeroing.
+            ll_rel_tol : float | None -- also stop when an iterate raises the log posterior by less
+                         than ll_rel_tol * |log posterior| (weakly identified fits, where theta drifts
+                         along nearly flat directions long after the likelihood has settled).
         """
         if init_theta is None:
             theta = self._activef / self._activef.sum(axis=1, keepdims=True)
@@ -337,6 +340,8 @@ class JointEM:
                     n_steps += 1
                     if llp >= ll1:
                         new = t3
+            ll_stall = (ll_rel_tol is not None and len(history) > 0
+                        and ll0 - history[-1] < ll_rel_tol * abs(ll0))
             history.append(ll0)
             diff = np.abs(new - theta)
             changed = int(np.count_nonzero((new > theta_floor) & (diff > rel_tol * new)))
@@ -344,7 +349,7 @@ class JointEM:
             it += 1
             if verbose and (it <= 3 or it % 50 == 0):
                 print(f"[JointEM] iterate {it} ({n_steps} MM steps): logpost={ll0:.6e} changed={changed}")
-            if n_steps >= min_iter and changed == 0:
+            if n_steps >= min_iter and (changed == 0 or ll_stall):
                 converged = True
                 break
         if zero_below is not None:

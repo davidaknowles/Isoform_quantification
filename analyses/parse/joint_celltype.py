@@ -45,6 +45,8 @@ from joli.paf import read_fasta_lengths
 from joli.rad import libraries_from_molecules, load_rad_dump, molecule_alignments
 
 SR_READ_LEN = 150
+# final fits: high step cap, and stop once the log posterior gains < 1e-10 relative per iterate
+RUN_KW = dict(max_iter=20000, ll_rel_tol=1e-10)
 KAPPA0 = np.exp(-8.6)       # poly(dT) internal priming per base (Parse dT + hexamer joint fits)
 PRIMERS = ("poly(dT)", "random hexamer")
 
@@ -179,7 +181,7 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
     fits = {"LR": (lr_libs, True, False),
             "joint_plain": ({**sr_libs, **lr_libs}, False, False),
             "joint": ({**sr_libs, **lr_libs}, True, True)}
-    tpm, summary, bias = {}, [], []
+    tpm, summary, bias, done = {}, [], [], {}
     for fit, (lib_dict, use_models, use_length) in fits.items():
         t0 = time.time()
         sr_models = {"poly(dT)": FeatureColumns(ReadPositionModel(tx_len, SR_READ_LEN, "3p", uniform=unspliced), [0]),
@@ -195,7 +197,14 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
         pi = np.zeros((len(libs), len(present)))
         pi[np.arange(len(libs)), [local[k] for k in unit_of]] = 1.0
         em = JointEM(libs, pi=pi, unit_names=[units[k] for k in present])
-        res = fit_bias(em, trunc=trunc, length=length, n_outer=8, verbose=True) if (trunc or length) else em.run()
+        # the full joint fit starts from the joint fit without bias models (same libraries and units)
+        init = done.get("joint_plain") if fit == "joint" else None
+        init = np.maximum(init[1], 1e-10) if init is not None and init[0] == present else None
+        if trunc or length:
+            res = fit_bias(em, trunc=trunc, length=length, n_outer=8, verbose=True, run_kw=RUN_KW, init_theta=init)
+        else:
+            res = em.run(init_theta=init, **RUN_KW)
+        done[fit] = (present, res.theta)
         for k in present:
             tpm[f"{fit}|{units[k]}"] = molar_to_tpm(res.theta[local[k]])
         if use_models:
@@ -213,7 +222,7 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
                 bias.append(pd.DataFrame({"fit": fit, "model": f"LR log unspliced scale {p}", "x": [0.0], "value": [m.w[-1]]}))
         summary.append({"fit": fit, "n_libraries": len(libs), "units": len(present), "loglik": res.loglik[-1],
                         "sr_log_kappa_unspliced": float(sr_kappa.w[0]) if sr_kappa is not None else np.nan,
-                        "n_iter": res.n_iter, "seconds": round(time.time() - t0, 1)})
+                        "n_iter": res.n_iter, "converged": res.converged, "seconds": round(time.time() - t0, 1)})
         print(summary[-1], flush=True)
 
     pd.DataFrame(summary).to_csv(out_dir / "fits.tsv", sep="\t", index=False)

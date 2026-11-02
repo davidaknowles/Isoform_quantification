@@ -331,3 +331,13 @@ def test_anchored_internal_component_runs_and_keeps_accuracy():
     res = fit_bias(JointEM([lib]), trunc={0: m}, n_outer=10)
     assert np.abs(res.theta[0] - theta).sum() < 0.2
     assert m.pi[0] > 0.8
+
+
+def test_loglik_stopping_rule_stops_earlier_with_same_fit():
+    aln, names, lens, theta = simulate_nested(np.random.default_rng(4))
+    lib = library_from_alignments("lr", filter_alignments(aln), names)
+    full = JointEM([lib]).run(rel_tol=1e-4)
+    fast = JointEM([lib]).run(rel_tol=1e-4, ll_rel_tol=1e-9)
+    assert fast.converged and fast.n_iter < full.n_iter, (fast.n_iter, full.n_iter)
+    assert 0.5 * np.abs(fast.theta[0] - full.theta[0]).sum() < 0.01
+    assert full.loglik[-1] - fast.loglik[-1] < 1e-6 * abs(full.loglik[-1])
