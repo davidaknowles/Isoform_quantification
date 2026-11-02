@@ -193,6 +193,16 @@ Results:
 
 Parse SR coverage check: on single-spliced-isoform genes of 2–4 kb only 30% of poly(dT) molecules lie within 500 nt of the 3' end (hexamer 9%), and 76% of poly(dT) molecules on 4–8 kb transcripts are > 2 kb from it. Parse poly(dT) coverage is broad, so the SR poly(dT) profile's mass at large distances reflects the data.
 
+### 2026-11-02 Unspliced scale in the Parse + Kinnex 10x joint fit; 10x read ends
+
+SG-NEx with all six replicates: the anchored read-end model is equal to or better than independent end profiles on every mix and protocol (sequins direct cDNA gene TV 0.077 → 0.073; SIRV E2 SRfrag+allLR SD of log ratio 1.173 → 1.145, log-Pearson 0.820 → 0.825).
+
+The joint fit had unspliced targets at ~0 TPM, a log-likelihood rising ~1.3e6 per outer iteration, SR $\log\kappa = -1.17$ and LR length curves rising 0.53 → 1.5 from 300 nt to 8 kb. Cause: poly(dT) base rates on unspliced targets were $L - r + 1$ (one internal priming per base), and the LR LengthBias kept its unspliced coefficient near 0 with ridge 1, so unspliced molar abundances were pushed down by about $1/\kappa$. The LR likelihood depends on unspliced abundance and scale only through their product, so alternating updates move slowly along that ridge. Fix: `primer_rates(..., kappa)` with base $\kappa_0 = e^{-8.6}$ (the Parse poly(dT)-vs-hexamer estimate) for SR and LR poly(dT), and ridge 1e-3 on the unspliced columns (`LengthBias(ridge_extra=)`), so the learned scales are corrections to $\kappa_0$.
+
+Result (same subsample, 76 SR + 139 LR libraries, 21 units): joint log-likelihood −1.147e9 → −1.131e9; per-outer increments fall from 1.3e6 to 6e4 (the final run still reaches the 5,000-step cap). Unspliced TPM share per cell type 8–32% (median 22%; LR-only 6%, where the scale is not identifiable). Learned scales: SR poly(dT) $\log\kappa = -8.6 + 1.30 = -7.3$, LR poly(dT) $-8.6 - 0.9 = -9.5$ (both kits). The LR length curves are now flat (0.81–1.27 between 300 nt and 16 kb): the earlier rise compensated for the unspliced misfit.
+
+10x Kinnex read ends on single-isoform genes (one chunk per kit): for 1–2 kb transcripts, 57% of 3'-kit reads (5' kit 31%) reach the annotated 5' end but stop ≥ 50 nt short of the annotated 3' end, against 16% (28%) reaching only the 3' end; full-length 13% (31%). Median aligned length 631 (719) nt. The cDNA reaches the template-switch end, while its poly(A) end is often upstream of GENCODE's 3' end (proximal poly(A) sites or internal priming), hence $\pi_{5'} \approx 0.7$ in the anchored model. Modelling 3' ends as poly(A)-site choice within an isoform is a possible extension.
+
 ### 2026-10-28 Rust E-step kernels
 
 `rust/joli_kernels` (C ABI, ctypes, no dependencies) implements the E-step over one library's flat EC layout; `JointEM(backend="auto")` uses it when built, numpy otherwise, and tests check agreement to 1e-10. On a dedicated node one E-step takes 6.8 ms against numpy's 13.1 ms (1.2M positions) and 13.7 against 23.0 ms (2.4M); the simulated SR+LR fit drops from 8.2 to 6.0 s. Splitting one library over threads loses at these sizes (a two-pass gather doubles memory traffic, and thread start-up and cold caches cost more than a 7–14 ms call), so libraries run concurrently in a thread pool (ctypes releases the GIL) and the two-pass kernel is used only from 5M positions per thread.
