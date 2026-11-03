@@ -11,16 +11,21 @@ abundances for its cell type and the fit's bias models for its kit:
 ll = sum_e n_e log sum_t mu_t c_et - N log sum_t mu_t b_t, over ECs with read-end
 features. Abundances are smoothed with eps of a uniform distribution (two values) so
 molecules on transcripts with zero fitted abundance stay finite; their count is reported.
+The within-gene score uses molecules whose transcripts all belong to one gene and
+conditions on the gene (log sum_{t in e} mu_t c_et - log sum_{t in gene} mu_t b_t), so
+gene-level expression differences between donors or platforms do not enter.
 
 Run with several training fractions (separate jobs share the held-out set) to see how
 the gain from short reads depends on LR depth.
 
-Writes {out_dir}/heldout.tsv (fit x held-out library), fits.tsv, tpm.tsv.gz.
+Writes {out_dir}/heldout.tsv (fit x held-out library), fits.tsv, tpm.tsv.gz and fits.pkl
+(abundances and LR bias models per fit, for scoring without refitting).
 
 Run: python analyses/parse/heldout_lr.py <sr_series_dirs> <lr_dirs> <ref_dir> <out_dir>
                                          <lr_train_fraction> [test_fraction] [sr_fraction] [min_cells]
 """
 
+import pickle
 import sys
 import time
 from pathlib import Path
@@ -37,7 +42,7 @@ from joli.lr_bias import bias_weights  # noqa: E402
 EPS = (1e-6, 1e-9)
 
 
-def score(ctx, fit, out, test_libs):
+def score(ctx, fit, out, test_libs, genes):
     """Held-out log-likelihood per test library under one fit (units the fit covers)."""
     res, present = out["res"], out["present"]
     local = {k: i for i, k in enumerate(present)}
@@ -57,9 +62,13 @@ def score(ctx, fit, out, test_libs):
                 "molecules": em.libs[l].N} for l, k in enumerate(keys)}
     for eps in EPS:
         ll, n_zero = em.library_loglik(res.theta, eps=eps)
+        llw, used, zw = em.library_loglik_within(res.theta, genes, eps=eps)
         for l, k in enumerate(keys):
             rows[k][f"ll_eps{eps:g}"] = ll[l]
             rows[k]["zero_prob_molecules"] = n_zero[l]
+            rows[k][f"ll_within_eps{eps:g}"] = llw[l]
+            rows[k][f"within_molecules_eps{eps:g}"] = used[l]
+            rows[k]["within_zero_prob_molecules"] = zw[l]
     return pd.DataFrame(rows.values())
 
 
@@ -70,7 +79,9 @@ def main(sr_dirs, kdir, ref_dir, out_dir, lr_train_fraction, test_fraction=0.1, 
     sr_libs, lr_libs, lr_test = jc.build_libraries(ctx, sr_fraction, lr_train_fraction, lr_test_fraction=test_fraction)
     print(f"held out: {len(lr_test)} LR libraries, {sum(l.tcc.ec_counts.sum() for l in lr_test.values()):.0f} molecules",
           flush=True)
-    rows, summary, tpm = [], [], {}
+    t2g = pd.read_csv(Path(ref_dir) / "t2g.tsv", sep="\t", header=None, index_col=0)[1]
+    genes = pd.factorize(t2g.reindex(ctx["names"]))[0]                 # -1 where unmapped
+    rows, summary, tpm, saved = [], [], {}, {}
     plain = None
     for fit, lib_dict, use_models, use_length in [("LR", lr_libs, True, False),
                                                    ("joint_plain", {**sr_libs, **lr_libs}, False, False),
@@ -81,7 +92,9 @@ def main(sr_dirs, kdir, ref_dir, out_dir, lr_train_fraction, test_fraction=0.1, 
         if fit == "joint_plain":
             plain = (out["present"], res.theta)      # warm start only: no read-end model, not scored
         else:
-            rows.append(score(ctx, fit, out, lr_test))
+            rows.append(score(ctx, fit, out, lr_test, genes))
+            saved[fit] = {"present": out["present"], "theta": res.theta, "lr_models": out["lr_models"],
+                          "lr_length": out["lr_length"]}
             for i, k in enumerate(out["present"]):
                 tpm[f"{fit}|{ctx['units'][k]}"] = molar_to_tpm(res.theta[i])
         summary.append({"fit": fit, "lr_train_fraction": float(lr_train_fraction), "n_libraries": len(out["keys"]),
@@ -93,6 +106,8 @@ def main(sr_dirs, kdir, ref_dir, out_dir, lr_train_fraction, test_fraction=0.1, 
     h.to_csv(out_dir / "heldout.tsv", sep="\t", index=False)
     pd.DataFrame(summary).to_csv(out_dir / "fits.tsv", sep="\t", index=False)
     pd.DataFrame(tpm, index=ctx["names"]).to_csv(out_dir / "tpm.tsv.gz", sep="\t", float_format="%.6g")
+    with open(out_dir / "fits.pkl", "wb") as fh:
+        pickle.dump({"units": ctx["units"], "fits": saved}, fh)
     both = h.pivot_table(index="library", columns="fit", values=f"ll_eps{EPS[0]:g}").dropna()
     n = h.drop_duplicates("library").set_index("library")["molecules"].reindex(both.index)
     print(f"held-out LR log-likelihood per molecule, joint - LR, over {len(both)} libraries: "

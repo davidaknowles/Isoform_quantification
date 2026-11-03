@@ -181,3 +181,27 @@ def test_library_loglik_matches_fit_loglik():
     ll0, nz0 = em.library_loglik(theta)
     ll1, _ = em.library_loglik(theta, eps=1e-6)
     assert nz0[0] > 0 and np.isneginf(ll0[0]) and np.isfinite(ll1[0])
+
+
+def test_library_loglik_within_one_gene_equals_conditional():
+    """With every transcript in one group, the within-group score is the full log-likelihood."""
+    from joli.joint import JointEM, Library
+    from joli.load_tcc import TCCData, FlatECs
+    rng = np.random.default_rng(5)
+    T = 50
+    names = [f"t{i}" for i in range(T)]
+    sizes = rng.integers(1, 4, size=80)
+    ptr = np.r_[0, np.cumsum(sizes)]
+    tcc = TCCData(ec_counts=rng.integers(1, 9, 80).astype(float),
+                  ec_transcripts=FlatECs(ptr, rng.integers(0, T, ptr[-1]).astype(np.int32)),
+                  transcript_names=names, total_reads=0, n_targets=T, sample_dir="")
+    em = JointEM([Library("l", tcc, b=rng.uniform(0.5, 2, T))])
+    th = em.run().theta
+    full, _ = em.library_loglik(th, eps=1e-9)
+    within, used, _ = em.library_loglik_within(th, np.zeros(T, dtype=int), eps=1e-9)
+    assert abs(full[0] - within[0]) < 1e-8 * abs(full[0]) and used[0] == tcc.ec_counts.sum()
+    # two groups: ECs spanning both are excluded
+    g = (np.arange(T) >= 25).astype(int)
+    _, used2, _ = em.library_loglik_within(th, g, eps=1e-9)
+    span = [len(set(g[t])) > 1 for t in tcc.ec_transcripts]
+    assert used2[0] == tcc.ec_counts[~np.array(span)].sum()

@@ -367,6 +367,39 @@ class JointEM:
                 + (-np.inf if (~ok & (fl.counts > 0)).any() else 0.0)
         return ll, n_zero
 
+    def library_loglik_within(self, theta, groups, eps=0.0):
+        """
+        Within-group log-likelihood of each library at fixed abundances: over ECs whose
+        transcripts all belong to one group g (e.g. a gene),
+        ll_l = sum_e n_e [log sum_{t in e} mu_t c_et - log sum_{t in g(e)} mu_t b_t],
+        the probability of the read given its group. Group-level expression (which may differ
+        between donors or platforms) then does not enter, only the split within groups.
+        groups : (T_full,) integer group code per transcript (negative: no group).
+        Returns (ll (L,), reads used (L,), reads with zero probability before smoothing (L,)).
+        """
+        th = np.asarray(theta, dtype=np.float64)
+        th_s = self._compact((1.0 - eps) * th + eps / th.shape[1])
+        th0 = self._compact(th)
+        gc = np.asarray(groups)[self.cols]
+        G = int(gc.max()) + 1
+        ll, used, n_zero = np.zeros(self.L), np.zeros(self.L), np.zeros(self.L)
+        for l, fl in enumerate(self.libs):
+            g = gc[fl.txc]
+            gmin = np.minimum.reduceat(g, fl.ec_ptr[:-1])
+            gmax = np.maximum.reduceat(g, fl.ec_ptr[:-1])
+            one = (gmin == gmax) & (gmin >= 0)
+            for t, which in ((th0, "raw"), (th_s, "smooth")):
+                mu = self.pi[l] @ t
+                d = np.bincount(fl.ec, weights=mu[fl.txc] * fl.c, minlength=fl.n_ec)
+                Bg = np.bincount(np.maximum(gc, 0), weights=np.where(gc >= 0, mu * fl.bc, 0.0), minlength=G)
+                if which == "raw":
+                    n_zero[l] = fl.counts[one & (d <= TOLERANCE)].sum()
+                    continue
+                ok = one & (d > TOLERANCE) & (Bg[np.maximum(gmin, 0)] > TOLERANCE)
+                ll[l] = fl.counts[ok] @ (np.log(d[ok]) - np.log(Bg[gmin[ok]]))
+                used[l] = fl.counts[ok].sum()
+        return ll, used, n_zero
+
     def set_bias(self, l, c=None, b=None):
         """Replace library l's flat compatibility weights c (aligned with its flat layout) and/or full-length rates b."""
         if c is not None:

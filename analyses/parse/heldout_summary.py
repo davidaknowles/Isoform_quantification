@@ -7,7 +7,8 @@ long reads), and the share of held-out molecules on transcripts with zero fitted
 abundance. Per cell type: the same difference, against the cell type's number of
 held-out molecules. Libraries are scored only where both fits cover the cell type.
 
-Writes {heldout_dir}/summary.tsv, summary_by_unit.tsv and heldout_gain.png.
+Scores: all (log-likelihood of the read) and within_gene (given its gene, single-gene
+ECs only). Writes {heldout_dir}/summary.tsv, summary_by_unit.tsv and heldout_gain.png.
 
 Run: python analyses/parse/heldout_summary.py <heldout_dir>
 """
@@ -28,10 +29,27 @@ def main(d):
     long = h.melt(id_vars=["fit", "library", "unit", "kit", "molecules", "zero_prob_molecules", "lr_train_fraction"],
                   value_vars=eps_cols, var_name="eps", value_name="ll")
     long["eps"] = long["eps"].str.replace("ll_eps", "")
-    w = long.pivot_table(index=["lr_train_fraction", "eps", "library", "unit", "kit", "molecules"], columns="fit",
-                         values="ll").dropna().reset_index()
-    z = h.pivot_table(index=["lr_train_fraction", "library"], columns="fit", values="zero_prob_molecules").reset_index()
-    w = w.merge(z.rename(columns={"LR": "zero_LR", "joint": "zero_joint"}), on=["lr_train_fraction", "library"])
+    long["score"] = "all"
+    if "ll_within_eps1e-06" in h.columns:
+        # within-gene score: molecules counted are those used (single-gene ECs) under each eps
+        parts = []
+        for c in [c for c in h.columns if c.startswith("ll_within_eps")]:
+            e = c.replace("ll_within_eps", "")
+            x = h[["fit", "library", "unit", "kit", "lr_train_fraction", "within_zero_prob_molecules", c,
+                   f"within_molecules_eps{e}"]].rename(columns={c: "ll", f"within_molecules_eps{e}": "molecules",
+                                                               "within_zero_prob_molecules": "zero_prob_molecules"})
+            x["eps"], x["score"] = e, "within_gene"
+            parts.append(x)
+        long = pd.concat([long] + parts, ignore_index=True)
+    # molecules per library and score from the LR fit (both fits score the same molecules)
+    nm = long[long["fit"] == "LR"].groupby(["lr_train_fraction", "eps", "score", "library"])["molecules"].first()
+    long = long.drop(columns="molecules").join(nm, on=["lr_train_fraction", "eps", "score", "library"])
+    w = long.pivot_table(index=["lr_train_fraction", "eps", "score", "library", "unit", "kit", "molecules"],
+                         columns="fit", values="ll").dropna().reset_index()
+    z = long.pivot_table(index=["lr_train_fraction", "eps", "score", "library"], columns="fit",
+                         values="zero_prob_molecules").reset_index()
+    w = w.merge(z.rename(columns={"LR": "zero_LR", "joint": "zero_joint"}),
+                on=["lr_train_fraction", "eps", "score", "library"])
 
     def agg(g):
         n = g["molecules"].sum()
@@ -40,14 +58,15 @@ def main(d):
                           "zero_share_LR": g["zero_LR"].sum() / n, "zero_share_joint": g["zero_joint"].sum() / n,
                           "libraries": len(g)})
 
-    s = w.groupby(["lr_train_fraction", "eps"]).apply(agg, include_groups=False).reset_index()
-    u = w.groupby(["lr_train_fraction", "eps", "unit"]).apply(agg, include_groups=False).reset_index()
+    s = w.groupby(["score", "lr_train_fraction", "eps"]).apply(agg, include_groups=False).reset_index()
+    u = w.groupby(["score", "lr_train_fraction", "eps", "unit"]).apply(agg, include_groups=False).reset_index()
     s.to_csv(d / "summary.tsv", sep="\t", index=False)
     u.to_csv(d / "summary_by_unit.tsv", sep="\t", index=False)
     print(s.round(4).to_string(index=False))
 
     eps0 = sorted(s["eps"].unique(), key=float)[-1]               # larger smoothing
     p = (ggplot(u[u["eps"] == eps0], aes("lr_train_fraction", "gain_per_molecule"))
+         + facet_wrap("~score", scales="free_y")
          + geom_hline(yintercept=0, linetype="dashed")
          + geom_line(aes(group="unit"), alpha=0.4)
          + geom_point(aes(size="molecules"), alpha=0.6)
