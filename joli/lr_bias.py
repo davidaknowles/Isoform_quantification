@@ -28,6 +28,7 @@ truncated multinomial data), iterated to convergence.
 """
 
 import numpy as np
+import pandas as pd
 
 DEFAULT_EDGES = np.array([0, 1, 3, 10, 25, 50, 100, 150, 200, 300, 400, 600, 800, 1000,
                           1500, 2000, 3000, 5000, 10000, 30000], dtype=np.float64)
@@ -540,32 +541,32 @@ class LengthBias:
         """
         Zs = Z if isinstance(Z, (list, tuple)) else [Z]
         mus = mu if isinstance(mu, (list, tuple)) else [mu]
-        Ns = [z.sum() for z in Zs]
+        Ns = np.array([z.sum() for z in Zs])
         XZ = sum(self.X.T @ z for z in Zs)
-        logmus = [np.log(np.maximum(m_, 1e-300)) for m_ in mus]
+        # libraries stacked (n_lib, T') over targets that some library can sample (mu > 0)
+        M = np.stack([np.asarray(m_, dtype=np.float64) for m_ in mus])
+        cols = np.flatnonzero((M > 0).any(axis=0))
+        X = self.X[cols]
+        logM = np.log(np.maximum(M[:, cols], 1e-300))
         P = len(self.w)
 
+        def softmax(w):
+            a = logM + (X @ w)[None, :]
+            amax = a.max(axis=1, keepdims=True)
+            e = np.exp(a - amax)
+            s_ = e.sum(axis=1, keepdims=True)
+            return e / s_, (amax + np.log(s_)).ravel()
+
         def objective(w):
-            eta = self.X @ w
-            f = XZ @ w - 0.5 * (self.ridge * w) @ w
-            for N, lm in zip(Ns, logmus):
-                a = lm + eta
-                amax = a.max()
-                f -= N * (amax + np.log(np.exp(a - amax).sum()))
-            return f
+            return XZ @ w - 0.5 * (self.ridge * w) @ w - Ns @ softmax(w)[1]
 
         f = objective(self.w)
         for _ in range(n_newton):
-            eta = self.X @ self.w
-            grad = XZ - self.ridge * self.w
-            H = np.diag(self.ridge)
-            for N, lm in zip(Ns, logmus):
-                a = lm + eta
-                p = np.exp(a - a.max())
-                p /= p.sum()
-                m = self.X.T @ p
-                grad -= N * m
-                H += N * ((self.X * p[:, None]).T @ self.X - np.outer(m, m))
+            p_, _ = softmax(self.w)
+            m = p_ @ X                                         # (n_lib, P)
+            grad = XZ - self.ridge * self.w - Ns @ m
+            q = Ns @ p_                                        # (T',) sum_l N_l p_l
+            H = np.diag(self.ridge) + (X * q[:, None]).T @ X - (m * Ns[:, None]).T @ m
             step = np.linalg.solve(H, grad)
             t = 1.0
             while True:
@@ -610,8 +611,62 @@ class StackedFeatures:
         return np.column_stack([m.features(start, end, tlen) for m in self.models])
 
 
+class _KeyTables:
+    """
+    Unique (transcript, features) keys of the libraries in a bias fit. Bias-model
+    weights and M-steps depend on a position only through its key, so they are
+    evaluated per key: each library has a local table (int32 row per position),
+    and each shared model a table over the union of its libraries' keys with a
+    map from local rows to model rows.
+    """
+
+    def __init__(self, em, libs, groups):
+        feats = [em.libs[l].feat for l in libs if em.libs[l].feat is not None]
+        ncol = max((f.shape[1] for f in feats), default=0)
+        self.width = np.ones(ncol, dtype=np.int64)
+        for f in feats:
+            for j in range(f.shape[1]):
+                self.width[j] = max(self.width[j], int(f[:, j].max()) + 1 if len(f) else 1)
+        if (self.width.prod() if ncol else 1) * (em.T_full + 1) >= 2 ** 62:
+            raise ValueError("feature key space too large for int64 keys")
+        self.ncol = {}
+        self.loc = {}                       # l -> (row per position int32, unique keys, transcript per row)
+        for l in libs:
+            fl = em.libs[l]
+            nc = 0 if fl.feat is None else fl.feat.shape[1]
+            self.ncol[l] = nc
+            idx, uk = pd.factorize(self._key(fl.tx, fl.feat, nc))
+            self.loc[l] = (idx.astype(np.int32), np.asarray(uk, dtype=np.int64), self._decode(uk, nc)[0])
+        self.model = {}                     # id(model) -> (tx_u, feat_u, {l: local row -> model row})
+        for model, ls in groups:
+            nc = self.ncol[ls[0]]
+            if any(self.ncol[l] != nc for l in ls):
+                raise ValueError("libraries sharing a bias model need the same feature columns")
+            codes, uk = pd.factorize(np.concatenate([self.loc[l][1] for l in ls]))
+            bounds = np.cumsum([0] + [len(self.loc[l][1]) for l in ls])
+            maps = {l: codes[bounds[i]:bounds[i + 1]] for i, l in enumerate(ls)}
+            tx_u, feat_u = self._decode(np.asarray(uk, dtype=np.int64), nc)
+            self.model[id(model)] = (tx_u, feat_u, maps)
+
+    def _key(self, tx, feat, nc):
+        key = np.asarray(tx, dtype=np.int64).copy()
+        for j in range(nc):
+            key *= self.width[j]
+            key += feat[:, j].astype(np.int64)
+        return key
+
+    def _decode(self, key, nc):
+        key = np.asarray(key, dtype=np.int64).copy()
+        cols = []
+        for j in reversed(range(nc)):
+            cols.append(key % self.width[j])
+            key //= self.width[j]
+        feat = np.column_stack(cols[::-1]).astype(np.int64) if nc else None
+        return key, feat
+
+
 def fit_bias(em, trunc=None, length=None, frag=None, n_outer=10, run_kw=None, verbose=False, inner_max_iter=500,
-             init_theta=None):
+             init_theta=None, aggregate=True):
     """
     Alternate JointEM runs (warm-started) with bias-model M-steps.
 
@@ -629,16 +684,32 @@ def fit_bias(em, trunc=None, length=None, frag=None, n_outer=10, run_kw=None, ve
         n_outer: number of outer iterations.
         inner_max_iter : MM-step cap for the fits between bias updates (the final fit uses run_kw).
         init_theta : (K, T) | None -- warm start of the first fit (e.g. from a fit without bias models).
+        aggregate : evaluate model weights and M-steps once per unique (transcript, features) key
+                 (_KeyTables), with the per-position passes in the compiled kernels when available;
+                 False evaluates them per position (reference implementation).
     Returns:
         JointResult of the final run; models are updated in place.
     """
+    import time
     trunc, length, frag = trunc or {}, length or {}, frag or {}
     run_kw = dict(run_kw or {})
-    libs = set(trunc) | set(length) | set(frag)
+    libs = sorted(set(trunc) | set(length) | set(frag))
     base_c = {l: em.libs[l].c.copy() for l in libs}
     base_b = {l: em.libs[l].b.copy() for l in libs}
+    groups_t, groups_f = list(_by_model(trunc).items()), list(_by_model(frag).items())
+    tables = _KeyTables(em, libs, groups_t + groups_f) if aggregate else None
+    rust = em.backend == "rust"
+    threads = 1
+    if rust:
+        from . import native
+        threads = em.threads or native.default_threads()
+    pool = None
+    if threads > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        pool = ThreadPoolExecutor(max_workers=threads)
+    pmap = (lambda f, xs: list(pool.map(f, xs))) if pool else (lambda f, xs: [f(x) for x in xs])
 
-    def apply():
+    def apply_positions():
         for l in libs:
             fl = em.libs[l]
             c = base_c[l].copy()
@@ -655,10 +726,54 @@ def fit_bias(em, trunc=None, length=None, frag=None, n_outer=10, run_kw=None, ve
                 b *= r
             em.set_bias(l, c=c, b=b)
 
+    def apply_tables():
+        wt = {id(m): m.weights(*tables.model[id(m)][:2]) for m, _ in groups_t + groups_f}
+        rates = {id(m): m.rates() for m in set(length.values())}
+        def one(l):
+            idx, _, txl = tables.loc[l]
+            wl = np.ones(len(txl))
+            b = base_b[l].copy()
+            if l in frag:
+                wl *= wt[id(frag[l])][tables.model[id(frag[l])][2][l]]
+                b = frag[l].rates()
+            if l in trunc:
+                wl *= wt[id(trunc[l])][tables.model[id(trunc[l])][2][l]] * base_b[l][txl]
+            if l in length:
+                r = rates[id(length[l])]
+                wl *= r[txl]
+                b = b * r
+            if rust:
+                c = native.gather_weights(base_c[l], idx, wl, threads=1)
+            else:
+                c = base_c[l] * wl[idx]
+            return c, b
+        for l, (c, b) in zip(libs, pmap(one, libs)):
+            em.set_bias(l, c=c, b=b)
+
+    def table_counts(theta, ls):
+        """Expected reads per local key row of each library in ls (compiled scatter when available)."""
+        th = em._compact(theta)
+        def one(l):
+            idx, uk, _ = tables.loc[l]
+            fl = em.libs[l]
+            if rust:
+                return native.scatter_counts(fl.ec_ptr, fl.txc, fl.c, fl.counts, em.pi[l] @ th, idx, len(uk))
+            return np.bincount(idx, weights=em.position_counts(theta, l), minlength=len(uk))
+        return pmap(one, ls)
+
+    def model_counts(model, ls, theta):
+        tx_u, feat_u, maps = tables.model[id(model)]
+        acc = np.zeros(len(tx_u))
+        per_lib = table_counts(theta, ls)
+        for l, a in zip(ls, per_lib):
+            acc += np.bincount(maps[l], weights=a, minlength=len(tx_u))
+        return tx_u, feat_u, acc, [a.sum() for a in per_lib]
+
+    apply = apply_tables if aggregate else apply_positions
+
     # intermediate fits only need to move theta towards the optimum for the next bias update;
     # the final fit (after the last bias update) runs to convergence
     inner_kw = dict(run_kw, max_iter=min(run_kw.get("max_iter", 5000), inner_max_iter))
-    import time
     t0 = time.time()
     apply()
     res = em.run(init_theta=init_theta, **inner_kw)
@@ -666,16 +781,24 @@ def fit_bias(em, trunc=None, length=None, frag=None, n_outer=10, run_kw=None, ve
     for it in range(n_outer):
         t0 = time.time()
         # one M-step per model object, pooling the libraries that share it
-        for model, ls in _by_model(trunc).items():
-            fls = [em.libs[l] for l in ls]
-            model.mstep(np.concatenate([fl.tx for fl in fls]), np.concatenate([fl.feat for fl in fls]),
-                        np.concatenate([em.position_counts(res.theta, l) for l in ls]))
-        for model, ls in _by_model(frag).items():
-            fls = [em.libs[l] for l in ls]
-            zs = [em.position_counts(res.theta, l) for l in ls]
+        for model, ls in groups_t:
+            if aggregate:
+                tx_u, feat_u, acc, _ = model_counts(model, ls, res.theta)
+                model.mstep(tx_u, feat_u, acc)
+            else:
+                fls = [em.libs[l] for l in ls]
+                model.mstep(np.concatenate([fl.tx for fl in fls]), np.concatenate([fl.feat for fl in fls]),
+                            np.concatenate([em.position_counts(res.theta, l) for l in ls]))
+        for model, ls in groups_f:
             mus = [em.pi[l] @ res.theta for l in ls]
-            model.mstep(np.concatenate([fl.tx for fl in fls]), np.concatenate([fl.feat for fl in fls]),
-                        np.concatenate(zs), mus, [z.sum() for z in zs])
+            if aggregate:
+                tx_u, feat_u, acc, Ns = model_counts(model, ls, res.theta)
+                model.mstep(tx_u, feat_u, acc, mus, Ns)
+            else:
+                fls = [em.libs[l] for l in ls]
+                zs = [em.position_counts(res.theta, l) for l in ls]
+                model.mstep(np.concatenate([fl.tx for fl in fls]), np.concatenate([fl.feat for fl in fls]),
+                            np.concatenate(zs), mus, [z.sum() for z in zs])
         for model, ls in _by_model(length).items():
             mus = []
             for l in ls:
@@ -694,6 +817,8 @@ def fit_bias(em, trunc=None, length=None, frag=None, n_outer=10, run_kw=None, ve
         if verbose:
             print(f"[bias] outer {it + 1}: loglik={res.loglik[-1]:.6e} n_iter={res.n_iter} "
                   f"(cumulative s: EM {t_run:.0f}, M-steps {t_m:.0f}, weights {t_apply:.0f})", flush=True)
+    if pool:
+        pool.shutdown()
     return res
 
 

@@ -354,3 +354,28 @@ def test_ec_construction_independent_of_alignment_order():
         return sorted(keys)
     shuffled = aln.sample(frac=1.0, random_state=1)
     assert summary(aln) == summary(shuffled)
+
+
+def test_key_table_fit_matches_per_position_fit():
+    """fit_bias(aggregate=True) evaluates models per unique (tx, features) key; results must match."""
+    from joli.lr_bias import AnchoredTruncationModel, LengthBias, fit_bias
+    from joli import native
+    aln0, names, lens, _ = simulate_censored(np.random.default_rng(8), n_genes=60, n_reads=3000)
+    aln1, _, _, _ = simulate_censored(np.random.default_rng(8), n_genes=60, n_reads=3000)      # same genes (same rng start)
+    proto = AnchoredTruncationModel(lens)
+    libs = [library_from_alignments(f"l{i}", a, names, features=proto.features(a.tstart, a.tend, a.tlen))
+            for i, a in enumerate([aln0, aln1])]
+    backends = ["numpy"] + (["rust"] if native.available() else [])
+    out = {}
+    for backend in backends:
+        for agg in [False, True]:
+            m = AnchoredTruncationModel(lens)
+            lb = LengthBias(lens, ridge=1.0)
+            em = JointEM(libs, units=[0, 1], backend=backend, threads=2)
+            res = fit_bias(em, trunc={0: m, 1: m}, length={1: lb}, n_outer=2, aggregate=agg,
+                           run_kw=dict(rel_tol=1e-8, max_iter=50000), inner_max_iter=50000)
+            out[(backend, agg)] = (res.theta, m.pi.copy(), m.g[0].p.copy(), lb.w.copy())
+    ref = out[("numpy", False)]
+    for key, val in out.items():
+        for a, b in zip(val, ref):
+            np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-7, err_msg=str(key))

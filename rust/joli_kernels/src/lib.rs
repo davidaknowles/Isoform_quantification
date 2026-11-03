@@ -262,3 +262,76 @@ pub unsafe extern "C" fn joli_estep_gather(
     });
     ll
 }
+
+/// Expected reads per position, z_p = counts[e] mu[tx_p] c_p / denom_e, summed into
+/// acc_out[idx_p] (length n_u, zeroed here) instead of stored per position: the
+/// sufficient statistics of bias models whose M-steps depend on a position only
+/// through its row idx_p of a table of unique (transcript, features) keys.
+#[no_mangle]
+pub unsafe extern "C" fn joli_scatter_counts(
+    n_ec: usize,
+    ec_ptr: *const i64,
+    tx: *const i64,
+    c: *const f64,
+    counts: *const f64,
+    mu: *const f64,
+    n_tx: usize,
+    idx: *const i32,
+    n_u: usize,
+    acc_out: *mut f64,
+) {
+    let ec_ptr = slice::from_raw_parts(ec_ptr, n_ec + 1);
+    let n_pos = ec_ptr[n_ec] as usize;
+    let tx = slice::from_raw_parts(tx, n_pos);
+    let c = slice::from_raw_parts(c, n_pos);
+    let counts = slice::from_raw_parts(counts, n_ec);
+    let mu = slice::from_raw_parts(mu, n_tx);
+    let idx = slice::from_raw_parts(idx, n_pos);
+    let acc = slice::from_raw_parts_mut(acc_out, n_u);
+    acc.iter_mut().for_each(|x| *x = 0.0);
+    for e in 0..n_ec {
+        let d = denom(e, ec_ptr, tx, c, mu);
+        if d > TINY {
+            let r = counts[e] / d;
+            for p in ec_ptr[e] as usize..ec_ptr[e + 1] as usize {
+                acc[idx[p] as usize] += r * mu[tx[p] as usize] * c[p];
+            }
+        }
+    }
+}
+
+/// out[p] = base[p] * w[idx[p]] for n_pos positions: compatibility weights from per-row
+/// factors of a table of unique (transcript, features) keys.
+#[no_mangle]
+pub unsafe extern "C" fn joli_gather_weights(
+    n_pos: usize,
+    base: *const f64,
+    idx: *const i32,
+    n_u: usize,
+    w: *const f64,
+    out: *mut f64,
+    n_threads: usize,
+) {
+    let base = slice::from_raw_parts(base, n_pos);
+    let idx = slice::from_raw_parts(idx, n_pos);
+    let w = slice::from_raw_parts(w, n_u);
+    let out = slice::from_raw_parts_mut(out, n_pos);
+    let n_threads = n_threads.max(1).min((n_pos / MIN_POS_PER_THREAD).max(1));
+    let chunk = (n_pos + n_threads - 1) / n_threads.max(1);
+    if n_threads <= 1 || chunk == 0 {
+        for p in 0..n_pos {
+            out[p] = base[p] * w[idx[p] as usize];
+        }
+        return;
+    }
+    std::thread::scope(|s| {
+        for (k, o) in out.chunks_mut(chunk).enumerate() {
+            let off = k * chunk;
+            s.spawn(move || {
+                for (i, x) in o.iter_mut().enumerate() {
+                    *x = base[off + i] * w[idx[off + i] as usize];
+                }
+            });
+        }
+    });
+}

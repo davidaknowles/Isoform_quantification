@@ -34,6 +34,10 @@ def _load():
     lib.joli_estep_gather.argtypes = [size, ptr, ptr, ptr, ptr, ptr, size, ptr, ptr, ptr, ptr, ptr, size]
     lib.joli_position_counts.restype = None
     lib.joli_position_counts.argtypes = [size, ptr, ptr, ptr, ptr, ptr, size, ptr, size]
+    lib.joli_scatter_counts.restype = None
+    lib.joli_scatter_counts.argtypes = [size, ptr, ptr, ptr, ptr, ptr, size, ptr, size, ptr]
+    lib.joli_gather_weights.restype = None
+    lib.joli_gather_weights.argtypes = [size, ptr, ptr, size, ptr, ptr, size]
     _LIB = lib
     return lib
 
@@ -97,3 +101,25 @@ def position_counts(ec_ptr, tx, c, counts, mu, threads=None):
     lib.joli_position_counts(len(counts), _p(ec_ptr), _p(tx), _p(c), _p(counts), _p(mu), len(mu), _p(z),
                              threads or default_threads())
     return z
+
+
+def scatter_counts(ec_ptr, tx, c, counts, mu, idx, n_u):
+    """acc (n_u,) with acc[u] = sum of z_p = n_e mu_t c_p / denom_e over positions p with idx[p] = u (one thread)."""
+    lib = _load()
+    _check(ec_ptr, tx, c, counts, mu)
+    if idx.dtype != np.int32 or not idx.flags.c_contiguous or len(idx) != len(tx):
+        raise TypeError("idx must be contiguous int32 with one entry per position")
+    acc = np.empty(n_u, dtype=np.float64)
+    lib.joli_scatter_counts(len(counts), _p(ec_ptr), _p(tx), _p(c), _p(counts), _p(mu), len(mu), _p(idx), n_u, _p(acc))
+    return acc
+
+
+def gather_weights(base, idx, w, threads=1, out=None):
+    """out (n_pos,) = base * w[idx]."""
+    lib = _load()
+    for a, dt in ((base, np.float64), (idx, np.int32), (w, np.float64)):
+        if a.dtype != dt or not a.flags.c_contiguous:
+            raise TypeError("gather_weights needs contiguous float64 base/w and int32 idx")
+    out = np.empty(len(base), dtype=np.float64) if out is None else out
+    lib.joli_gather_weights(len(base), _p(base), _p(idx), len(w), _p(w), _p(out), threads)
+    return out
