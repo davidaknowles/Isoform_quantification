@@ -152,3 +152,32 @@ def test_onehot_estep_matches_dense():
         np.testing.assert_allclose(x, y, rtol=1e-12)
     assert abs(a[2] - b[2]) < 1e-8 * abs(b[2])
     np.testing.assert_allclose(fast.run().theta, dense.run().theta, atol=1e-10)
+
+
+def test_library_loglik_matches_fit_loglik():
+    from joli.joint import JointEM, Library
+    from joli.load_tcc import TCCData, FlatECs
+    rng = np.random.default_rng(4)
+    T, L = 200, 4
+    names = [f"t{i}" for i in range(T)]
+    libs = []
+    for l in range(L):
+        sizes = rng.integers(1, 4, size=150)
+        ptr = np.r_[0, np.cumsum(sizes)]
+        tcc = TCCData(ec_counts=rng.integers(1, 9, 150).astype(float),
+                      ec_transcripts=FlatECs(ptr, rng.integers(0, T, ptr[-1]).astype(np.int32)),
+                      transcript_names=names, total_reads=0, n_targets=T, sample_dir="")
+        libs.append(Library(f"l{l}", tcc, b=rng.uniform(0.5, 2, T), c=FlatECs(ptr, rng.uniform(0.1, 1, ptr[-1]))))
+    em = JointEM(libs, units=[0, 1, 0, 1])
+    res = em.run(zero_below=None)
+    ll, n_zero = em.library_loglik(res.theta)
+    assert abs(ll.sum() - res.loglik[-1]) < 1e-8 * abs(res.loglik[-1])
+    assert n_zero.sum() == 0
+    # an EC on a transcript with zero abundance: -inf without smoothing, finite with it
+    theta = res.theta.copy()
+    t0 = libs[0].tcc.ec_transcripts[0]
+    theta[0, t0] = 0.0
+    theta /= theta.sum(axis=1, keepdims=True)
+    ll0, nz0 = em.library_loglik(theta)
+    ll1, _ = em.library_loglik(theta, eps=1e-6)
+    assert nz0[0] > 0 and np.isneginf(ll0[0]) and np.isfinite(ll1[0])

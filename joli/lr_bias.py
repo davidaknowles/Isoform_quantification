@@ -665,6 +665,32 @@ class _KeyTables:
         return key, feat
 
 
+def bias_weights(tx, feat, base_c, base_b, trunc=None, length=None, frag=None):
+    """
+    Compatibility weights c (per position) and sampling rates b (T,) of a library under fitted
+    bias models, as fit_bias sets them: c = base_c x [fld q] x [b_t q(position | t)] x [r_t],
+    b = [effective length under fld | base_b] x [r]. Used to score held-out libraries.
+
+    Args:
+        tx, feat : (n,) global transcript index and (n, F) features per position.
+        base_c   : (n,) base weights (e.g. ones); base_b : (T,) base sampling rates.
+        trunc, length, frag : fitted models (as in fit_bias) or None.
+    """
+    c = np.array(base_c, dtype=np.float64, copy=True)
+    b = np.array(base_b, dtype=np.float64, copy=True)
+    if frag is not None:
+        c *= frag.weights(tx, feat)
+        b = frag.rates()
+    if trunc is not None:
+        # positional density times the base sampling rate (c = b q)
+        c *= trunc.weights(tx, feat) * base_b[tx]
+    if length is not None:
+        r = length.rates()
+        c *= r[tx]
+        b = b * r
+    return c, b
+
+
 def fit_bias(em, trunc=None, length=None, frag=None, n_outer=10, run_kw=None, verbose=False, inner_max_iter=500,
              init_theta=None, aggregate=True):
     """
@@ -712,18 +738,7 @@ def fit_bias(em, trunc=None, length=None, frag=None, n_outer=10, run_kw=None, ve
     def apply_positions():
         for l in libs:
             fl = em.libs[l]
-            c = base_c[l].copy()
-            b = base_b[l].copy()
-            if l in frag:
-                c *= frag[l].weights(fl.tx, fl.feat)
-                b = frag[l].rates()
-            if l in trunc:
-                # positional density times the base sampling rate (c = b q)
-                c *= trunc[l].weights(fl.tx, fl.feat) * base_b[l][fl.tx]
-            if l in length:
-                r = length[l].rates()
-                c *= r[fl.tx]
-                b *= r
+            c, b = bias_weights(fl.tx, fl.feat, base_c[l], base_b[l], trunc.get(l), length.get(l), frag.get(l))
             em.set_bias(l, c=c, b=b)
 
     def apply_tables():

@@ -342,6 +342,31 @@ class JointEM:
         denom = np.bincount(fl.ec, weights=w, minlength=fl.n_ec)
         return np.where(denom[fl.ec] > TOLERANCE, fl.counts[fl.ec] * w / np.maximum(denom[fl.ec], TOLERANCE), 0.0)
 
+    def library_loglik(self, theta, eps=0.0):
+        """
+        Log-likelihood of each library at fixed abundances (e.g. held-out libraries scored with
+        abundances fitted elsewhere): ll_l = sum_e n_e log(sum_t mu_t c_et) - N_l log(sum_t mu_t b_t),
+        mu_l = pi_l theta. theta is full length (K, T_full); eps mixes in eps of a uniform
+        distribution over all targets so ECs whose transcripts have zero abundance stay finite.
+        Returns (ll (L,), n_zero (L,)): n_zero counts reads in ECs of zero probability before smoothing.
+        """
+        th = np.asarray(theta, dtype=np.float64)
+        th_s = (1.0 - eps) * th + eps / th.shape[1]
+        th, th_s = self._compact(th), self._compact(th_s)
+        ll, n_zero = np.zeros(self.L), np.zeros(self.L)
+        for l, fl in enumerate(self.libs):
+            out = []
+            for t in (th, th_s):
+                mu = self.pi[l] @ t
+                denom = np.bincount(fl.ec, weights=mu[fl.txc] * fl.c, minlength=fl.n_ec)
+                out.append((denom, mu))
+            (d0, _), (d, mu) = out
+            n_zero[l] = fl.counts[d0 <= TOLERANCE].sum()
+            ok = d > TOLERANCE
+            ll[l] = fl.counts[ok] @ np.log(d[ok]) - fl.N * np.log(mu @ fl.bc) \
+                + (-np.inf if (~ok & (fl.counts > 0)).any() else 0.0)
+        return ll, n_zero
+
     def set_bias(self, l, c=None, b=None):
         """Replace library l's flat compatibility weights c (aligned with its flat layout) and/or full-length rates b."""
         if c is not None:

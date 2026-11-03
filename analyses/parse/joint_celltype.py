@@ -123,42 +123,54 @@ def sr_libraries(sources, names, fraction, rates, model):
     return libs
 
 
-def lr_libraries(sources, names, fraction, rates, model, seed=0):
-    """Libraries of the groups in `rates`, built one source library at a time (random molecule fraction)."""
-    libs = {}
+def lr_libraries(sources, names, fraction, rates, model, seed=0, test_fraction=0.0):
+    """
+    Libraries of the groups in `rates`, built one source library at a time. Each molecule draws
+    u ~ U(0, 1) (fixed seed): u < test_fraction goes to held-out libraries, and training keeps
+    test_fraction <= u < test_fraction + fraction (1 - test_fraction), so training sets of
+    different `fraction` are nested and share one held-out set. Returns the training libraries,
+    or (training, held-out) when test_fraction > 0.
+    """
+    libs, test_libs = {}, {}
     rng = np.random.default_rng(seed)
+    lo, hi = test_fraction, test_fraction + fraction * (1.0 - test_fraction)
     for files, groups, _ in sources:
         t0 = time.time()
-        parts, off = [], 0
+        parts, tparts, off = [], [], 0
         for f in files:
             z = np.load(f)
             mol = z["mol"] if "mol" in z else pd.factorize(z["read"])[0]
-            keep = rng.random(int(mol.max()) + 1) < fraction
+            u = rng.random(int(mol.max()) + 1)[mol]
             cell = 2 * z["cell"].astype(np.int64) + z["half"]
-            sel = keep[mol] & pd.Series(groups[cell]).isin(rates).to_numpy()
-            parts.append(pd.DataFrame({"read": mol[sel].astype(np.int64) + off,
-                                       "cell": cell[sel], "tx_idx": z["tx_idx"][sel], "start": z["tstart"][sel],
-                                       "end": z["tend"][sel], "tlen": z["tlen"][sel]}))
+            ok = pd.Series(groups[cell]).isin(rates).to_numpy()
+            for dest, sel in ((parts, ok & (u >= lo) & (u < hi)), (tparts, ok & (u < lo))):
+                if sel.any():
+                    dest.append(pd.DataFrame({"read": mol[sel].astype(np.int64) + off,
+                                              "cell": cell[sel], "tx_idx": z["tx_idx"][sel], "start": z["tstart"][sel],
+                                              "end": z["tend"][sel], "tlen": z["tlen"][sel]}))
             off += int(mol.max()) + 1
         a = pd.concat(parts, ignore_index=True)
         del parts
         new = libraries_from_molecules(a, groups, names, rates, model=model, platform="long")
         libs.update(new)
+        if tparts:
+            test_libs.update(libraries_from_molecules(pd.concat(tparts, ignore_index=True), groups, names, rates,
+                                                      model=model, platform="long"))
+        del tparts
         print(f"LR {files[0].stem.rsplit('_', 1)[0]} ({len(files)} files): {a['read'].nunique()} molecules -> "
               f"{len(new)} libraries, {sum(len(l.tcc.ec_counts) for l in new.values())} ECs ({time.time() - t0:.0f} s)",
               flush=True)
-    return libs
+    return (libs, test_libs) if test_fraction > 0 else libs
 
 
-def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_cells=100):
-    ref_dir, out_dir = Path(ref_dir), Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+def prepare(sr_dirs, kdir, ref_dir, min_cells=100):
+    """Reference, sources, units (cell types with >= min_cells in either platform) and base rates."""
+    ref_dir = Path(ref_dir)
     names, tx_len = read_fasta_lengths(ref_dir / "spliceu.fa")
     unspliced = np.array([n.endswith("-U") for n in names])
     sr_src = sr_sources(sr_dirs.split(","))
     lr_src = lr_sources(kdir.split(","))
-
-    # units: cell types with >= min_cells in either platform (two primer barcodes per SR cell)
+    # two primer barcodes per SR cell
     sr_cells = pd.Series([g.split("|")[0] for _, _, _, gs in sr_src for g in gs]).value_counts() // 2
     lr_cells = pd.Series([t for _, _, ts in {id(s[2]): s for s in lr_src}.values() for t in ts
                           if isinstance(t, str)]).value_counts()
@@ -169,37 +181,79 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
     print(f"{len(units)} units, {len(both)} with both platforms: {both}", flush=True)
     unit_idx = {u: k for k, u in enumerate(units)}
 
-    sr_feat = StackedFeatures([ReadPositionModel(tx_len, SR_READ_LEN, "3p", uniform=unspliced),
-                               ReadPositionModel(tx_len, SR_READ_LEN, "relative", uniform=unspliced)])
     def rate(g):
         plat, kit = g.split("|")[1:3]
         return primer_rates(kit.split("@")[0], tx_len, SR_READ_LEN if plat == "SR" else 0, unspliced, kappa=KAPPA0)
     keep_g = lambda gs: {g: rate(g) for g in set(x for x in gs if x is not None) if g.split("|")[0] in unit_idx}
+    return dict(names=names, tx_len=tx_len, unspliced=unspliced, sr_src=sr_src, lr_src=lr_src,
+                units=units, unit_idx=unit_idx, keep_g=keep_g)
+
+
+def build_libraries(ctx, sr_fraction, lr_fraction, lr_test_fraction=0.0):
+    """SR and LR libraries (and held-out LR libraries when lr_test_fraction > 0; else None)."""
+    names, tx_len, unspliced = ctx["names"], ctx["tx_len"], ctx["unspliced"]
+    sr_feat = StackedFeatures([ReadPositionModel(tx_len, SR_READ_LEN, "3p", uniform=unspliced),
+                               ReadPositionModel(tx_len, SR_READ_LEN, "relative", uniform=unspliced)])
     t0 = time.time()
-    sr_libs = sr_libraries(sr_src, names, float(sr_fraction), keep_g([g for s in sr_src for g in s[3]]), sr_feat)
-    lr_libs = lr_libraries(lr_src, names, float(lr_fraction), keep_g({g for s in lr_src for g in s[1]}),
-                           AnchoredTruncationModel(tx_len, uniform=unspliced))
+    sr_libs = {} if float(sr_fraction) <= 0 else sr_libraries(
+        ctx["sr_src"], names, float(sr_fraction), ctx["keep_g"]([g for s in ctx["sr_src"] for g in s[3]]), sr_feat)
+    lr = lr_libraries(ctx["lr_src"], names, float(lr_fraction), ctx["keep_g"]({g for s in ctx["lr_src"] for g in s[1]}),
+                      AnchoredTruncationModel(tx_len, uniform=unspliced), test_fraction=float(lr_test_fraction))
+    lr_libs, lr_test = lr if float(lr_test_fraction) > 0 else (lr, None)
     n_pos = sum(len(l.tcc.ec_transcripts.values) for l in {**sr_libs, **lr_libs}.values())
     print(f"{len(sr_libs)} SR and {len(lr_libs)} LR libraries, {n_pos} EC positions ({time.time() - t0:.0f} s)", flush=True)
+    return sr_libs, lr_libs, lr_test
 
-    def setup(lib_dict, use_models, sr_models, lr_models, lr_length, sr_kappa):
-        keys = sorted(lib_dict)
-        libs = [lib_dict[k] for k in keys]
-        unit_of = [unit_idx[k.split("|")[0]] for k in keys]
-        trunc, length = {}, {}
-        if use_models:
-            for i, k in enumerate(keys):
-                plat, primer = k.split("|")[1:3]
-                if plat == "SR":
-                    trunc[i] = sr_models[primer]
-                    if sr_kappa is not None and primer == "poly(dT)":
-                        length[i] = sr_kappa
-                else:
-                    # one truncation and one length model per long-read kit, created on first use
-                    trunc[i] = lr_models.setdefault(primer, AnchoredTruncationModel(tx_len, uniform=unspliced))
-                    if lr_length is not None:
-                        length[i] = lr_length.setdefault(primer, LengthBias(tx_len, extra=unspliced[:, None], ridge_extra=1e-3))
-        return keys, libs, unit_of, trunc, length
+
+def fit_one(ctx, lib_dict, use_models, use_length, init=None, verbose=True):
+    """
+    Fit one configuration. Bias models are shared per platform x primer/kit: SR position profiles
+    (poly(dT): distance to the 3' end; hexamer: relative position) and the SR poly(dT) unspliced
+    scale; per LR kit an AnchoredTruncationModel and a LengthBias with an unspliced scale.
+    init: (present units, theta) of an earlier fit on the same units, or None.
+    Returns dict with res, present (unit indices), keys (library keys), and the fitted models.
+    """
+    tx_len, unspliced, unit_idx = ctx["tx_len"], ctx["unspliced"], ctx["unit_idx"]
+    sr_models = {"poly(dT)": FeatureColumns(ReadPositionModel(tx_len, SR_READ_LEN, "3p", uniform=unspliced), [0]),
+                 "random hexamer": FeatureColumns(ReadPositionModel(tx_len, SR_READ_LEN, "relative", uniform=unspliced), [1])}
+    lr_models = {}
+    lr_length = {} if use_length else None
+    sr_kappa = LengthBias(tx_len, extra=unspliced[:, None], length_terms=False, ridge=1e-3) if use_length else None
+    keys = sorted(lib_dict)
+    libs = [lib_dict[k] for k in keys]
+    unit_of = [unit_idx[k.split("|")[0]] for k in keys]
+    trunc, length = {}, {}
+    if use_models:
+        for i, k in enumerate(keys):
+            plat, primer = k.split("|")[1:3]
+            if plat == "SR":
+                trunc[i] = sr_models[primer]
+                if sr_kappa is not None and primer == "poly(dT)":
+                    length[i] = sr_kappa
+            else:
+                trunc[i] = lr_models.setdefault(primer, AnchoredTruncationModel(tx_len, uniform=unspliced))
+                if lr_length is not None:
+                    length[i] = lr_length.setdefault(primer, LengthBias(tx_len, extra=unspliced[:, None], ridge_extra=1e-3))
+    present = sorted(set(unit_of))
+    local = {k: i for i, k in enumerate(present)}
+    pi = np.zeros((len(libs), len(present)))
+    pi[np.arange(len(libs)), [local[k] for k in unit_of]] = 1.0
+    em = JointEM(libs, pi=pi, unit_names=[ctx["units"][k] for k in present])
+    init_theta = np.maximum(init[1], 1e-10) if init is not None and init[0] == present else None
+    if trunc or length:
+        res = fit_bias(em, trunc=trunc, length=length, n_outer=8, verbose=verbose, run_kw=RUN_KW, init_theta=init_theta)
+    else:
+        res = em.run(init_theta=init_theta, **RUN_KW)
+    return dict(res=res, present=present, keys=keys, sr_models=sr_models, lr_models=lr_models,
+                lr_length=lr_length, sr_kappa=sr_kappa)
+
+
+def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_cells=100):
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ctx = prepare(sr_dirs, kdir, ref_dir, min_cells)
+    sr_libs, lr_libs, _ = build_libraries(ctx, sr_fraction, lr_fraction)
+    units = ctx["units"]
 
     # LR alone (with truncation) is the baseline; SR alone cannot identify isoforms, so it is not fitted
     fits = {"LR": (lr_libs, True, False),
@@ -208,43 +262,16 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
     tpm, summary, bias, done = {}, [], [], {}
     for fit, (lib_dict, use_models, use_length) in fits.items():
         t0 = time.time()
-        sr_models = {"poly(dT)": FeatureColumns(ReadPositionModel(tx_len, SR_READ_LEN, "3p", uniform=unspliced), [0]),
-                     "random hexamer": FeatureColumns(ReadPositionModel(tx_len, SR_READ_LEN, "relative", uniform=unspliced), [1])}
-        lr_models = {}
-        # LR: smooth length bias plus a separate scale for unspliced targets; SR poly(dT): the
-        # scale of internal priming on unspliced targets (SR hexamer and SR poly(dT) spliced rates fixed)
-        lr_length = {} if use_length else None
-        sr_kappa = LengthBias(tx_len, extra=unspliced[:, None], length_terms=False, ridge=1e-3) if use_length else None
-        keys, libs, unit_of, trunc, length = setup(lib_dict, use_models, sr_models, lr_models, lr_length, sr_kappa)
-        present = sorted(set(unit_of))                    # units covered by this fit's libraries
-        local = {k: i for i, k in enumerate(present)}
-        pi = np.zeros((len(libs), len(present)))
-        pi[np.arange(len(libs)), [local[k] for k in unit_of]] = 1.0
-        em = JointEM(libs, pi=pi, unit_names=[units[k] for k in present])
         # the full joint fit starts from the joint fit without bias models (same libraries and units)
-        init = done.get("joint_plain") if fit == "joint" else None
-        init = np.maximum(init[1], 1e-10) if init is not None and init[0] == present else None
-        if trunc or length:
-            res = fit_bias(em, trunc=trunc, length=length, n_outer=8, verbose=True, run_kw=RUN_KW, init_theta=init)
-        else:
-            res = em.run(init_theta=init, **RUN_KW)
+        out = fit_one(ctx, lib_dict, use_models, use_length, init=done.get("joint_plain") if fit == "joint" else None)
+        res, present = out["res"], out["present"]
         done[fit] = (present, res.theta)
-        for k in present:
-            tpm[f"{fit}|{units[k]}"] = molar_to_tpm(res.theta[local[k]])
+        for i, k in enumerate(present):
+            tpm[f"{fit}|{units[k]}"] = molar_to_tpm(res.theta[i])
         if use_models:
-            for p, m in sr_models.items():
-                bias.append(pd.DataFrame({"fit": fit, "model": f"SR position {p}", "x": m.model.prof.edges[:-1], "value": m.model.prof.p}))
-            for p, m in lr_models.items():
-                q = m.profiles()
-                bias.append(pd.DataFrame({"fit": fit, "model": f"LR {p} " + q["anchor"] + "-anchored " + q["kind"],
-                                          "x": q["x"], "value": q["value"]}))
-                bias.append(pd.DataFrame({"fit": fit, "model": f"LR {p} unspliced read_length",
-                                          "x": m.length.edges[:-1], "value": m.length.p}))
-            for p, m in (lr_length or {}).items():
-                grid = np.array([300, 500, 1000, 2000, 4000, 8000, 16000])
-                bias.append(pd.DataFrame({"fit": fit, "model": f"LR length {p}", "x": grid, "value": m.rates_at(grid)}))
-                bias.append(pd.DataFrame({"fit": fit, "model": f"LR log unspliced scale {p}", "x": [0.0], "value": [m.w[-1]]}))
-        summary.append({"fit": fit, "n_libraries": len(libs), "units": len(present), "loglik": res.loglik[-1],
+            bias.append(bias_table(fit, out))
+        sr_kappa = out["sr_kappa"]
+        summary.append({"fit": fit, "n_libraries": len(out["keys"]), "units": len(present), "loglik": res.loglik[-1],
                         "sr_log_kappa_unspliced": float(sr_kappa.w[0]) if sr_kappa is not None else np.nan,
                         "n_iter": res.n_iter, "converged": res.converged, "seconds": round(time.time() - t0, 1)})
         print(summary[-1], flush=True)
@@ -252,7 +279,25 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
     pd.DataFrame(summary).to_csv(out_dir / "fits.tsv", sep="\t", index=False)
     if bias:
         pd.concat(bias).to_csv(out_dir / "bias.tsv", sep="\t", index=False)
-    pd.DataFrame(tpm, index=names).to_csv(out_dir / "tpm.tsv.gz", sep="\t", float_format="%.6g")
+    pd.DataFrame(tpm, index=ctx["names"]).to_csv(out_dir / "tpm.tsv.gz", sep="\t", float_format="%.6g")
+
+
+def bias_table(fit, out):
+    """Long-format table of a fit's bias models."""
+    rows = []
+    for p, m in out["sr_models"].items():
+        rows.append(pd.DataFrame({"fit": fit, "model": f"SR position {p}", "x": m.model.prof.edges[:-1], "value": m.model.prof.p}))
+    for p, m in out["lr_models"].items():
+        q = m.profiles()
+        rows.append(pd.DataFrame({"fit": fit, "model": f"LR {p} " + q["anchor"] + "-anchored " + q["kind"],
+                                  "x": q["x"], "value": q["value"]}))
+        rows.append(pd.DataFrame({"fit": fit, "model": f"LR {p} unspliced read_length",
+                                  "x": m.length.edges[:-1], "value": m.length.p}))
+    for p, m in (out["lr_length"] or {}).items():
+        grid = np.array([300, 500, 1000, 2000, 4000, 8000, 16000])
+        rows.append(pd.DataFrame({"fit": fit, "model": f"LR length {p}", "x": grid, "value": m.rates_at(grid)}))
+        rows.append(pd.DataFrame({"fit": fit, "model": f"LR log unspliced scale {p}", "x": [0.0], "value": [m.w[-1]]}))
+    return pd.concat(rows)
 
 
 if __name__ == "__main__":
