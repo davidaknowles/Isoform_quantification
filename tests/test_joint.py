@@ -262,3 +262,33 @@ def test_tied_fractions_pool_platforms_when_gene_expression_differs():
     lr_only = JointEM(libs[:1]).run(rel_tol=1e-6, max_iter=20000).theta[0]
     e_shared, e_tied, e_lr = within_err(shared), within_err(tied), within_err(lr_only)
     assert e_tied <= e_shared + 1e-3 and e_tied < 0.6 * e_lr, (e_shared, e_tied, e_lr)
+
+
+def _close_theta(a, b, tol):
+    return 0.5 * np.abs(a - b).sum(axis=1).max() < tol
+
+
+def test_pooling_limits():
+    """Small tau: pooled units approach one shared theta; large tau: separate units (transcript level)
+    or tied units with free gene totals (gene level)."""
+    from joli.joint import JointEM
+    libs, gene, _ = _two_platforms(np.random.default_rng(2), G=60, gene_shift=1.0)
+    kw = dict(rel_tol=1e-7, max_iter=50000, zero_below=None)
+    shared = JointEM(libs, units=[0, 0]).run(**kw).theta[0]
+    separate = JointEM(libs, units=[0, 1]).run(**kw).theta
+    tied = JointEM(libs, units=[0, 1], tie=[0, 0], groups=gene).run(**kw).theta
+    for level in ["transcript", "gene"]:
+        small = JointEM(libs, units=[0, 1], tie=[0, 0], groups=gene, pool=level, pool_tau=0.003).run(**kw).theta
+        assert _close_theta(small, np.stack([shared, shared]), 0.02), level
+        large = JointEM(libs, units=[0, 1], tie=[0, 0], groups=gene, pool=level, pool_tau=30.0).run(**kw).theta
+        assert _close_theta(large, separate if level == "transcript" else tied, 0.02), level
+
+
+def test_pooled_fit_increases_log_posterior():
+    from joli.joint import JointEM
+    libs, gene, _ = _two_platforms(np.random.default_rng(3), G=60, gene_shift=1.0)
+    for level in ["transcript", "gene"]:
+        res = JointEM(libs, units=[0, 1], tie=[0, 0], groups=gene, pool=level, pool_tau=0.5).run(
+            rel_tol=1e-7, max_iter=20000, zero_below=None, accelerate=False)
+        lp = np.array(res.loglik[:-1])
+        assert (np.diff(lp[1:]) > -1e-6 * abs(lp[-1])).all(), level

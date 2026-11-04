@@ -25,6 +25,8 @@ from plotnine import (aes, facet_wrap, geom_hline, geom_line, geom_point, ggplot
 def main(d):
     d = Path(d)
     h = pd.concat([pd.read_csv(f, sep="\t") for f in sorted(d.glob("train_*/heldout.tsv"))], ignore_index=True)
+    # fits repeated across output directories (e.g. joint as a warm start of pooled fits): keep one
+    h = h.drop_duplicates(["fit", "library", "lr_train_fraction"])
     eps_cols = [c for c in h.columns if c.startswith("ll_eps")]
     long = h.melt(id_vars=["fit", "library", "unit", "kit", "molecules", "zero_prob_molecules", "lr_train_fraction"],
                   value_vars=eps_cols, var_name="eps", value_name="ll")
@@ -45,15 +47,15 @@ def main(d):
     nm = long[long["fit"] == "LR"].groupby(["lr_train_fraction", "eps", "score", "library"])["molecules"].first()
     long = long.drop(columns="molecules").join(nm, on=["lr_train_fraction", "eps", "score", "library"])
     w = long.pivot_table(index=["lr_train_fraction", "eps", "score", "library", "unit", "kit", "molecules"],
-                         columns="fit", values="ll").dropna().reset_index()
+                         columns="fit", values="ll").reset_index()
     z = long.pivot_table(index=["lr_train_fraction", "eps", "score", "library"], columns="fit",
                          values="zero_prob_molecules").reset_index()
     fits = [f for f in long["fit"].unique() if f != "LR"]
     w = w.merge(z.rename(columns={f: f"zero_{f}" for f in ["LR"] + fits}),
                 on=["lr_train_fraction", "eps", "score", "library"])
     # long format over the fits compared with LR alone
-    w = pd.concat([w.assign(fit=f, other=w[f], zero_other=w[f"zero_{f}"]) for f in fits if f in w.columns],
-                  ignore_index=True)
+    w = pd.concat([w.assign(fit=f, other=w[f], zero_other=w[f"zero_{f}"]).dropna(subset=["LR", "other"])
+                   for f in fits if f in w.columns], ignore_index=True)
 
     def agg(g):
         n = g["molecules"].sum()

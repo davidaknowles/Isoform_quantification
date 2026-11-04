@@ -8,6 +8,9 @@ from every LR library. Fits use a training fraction of the remaining molecules:
          (warm-started from the same libraries without bias models)
   joint_gene  as joint, with platform-specific gene totals and within-gene fractions
          shared across platforms (units cell type x platform; warm-started from joint)
+  joint_gpool_t<tau>, joint_tpool_t<tau>  (only when requested in [fits]) partial pooling: platform
+         gene totals (shared within-gene fractions) or transcript abundances shrunk towards a
+         shared cell-type profile, log-scale sd tau (warm-started from joint)
 Each held-out LR library (cell type x kit x source library) is scored at the fit's
 abundances for its cell type and the fit's bias models for its kit:
 ll = sum_e n_e log sum_t mu_t c_et - N log sum_t mu_t b_t, over ECs with read-end
@@ -28,6 +31,7 @@ Run: python analyses/parse/heldout_lr.py <sr_series_dirs> <lr_dirs> <ref_dir> <o
 """
 
 import pickle
+import re
 import sys
 import time
 from pathlib import Path
@@ -75,8 +79,8 @@ def score(ctx, fit, out, test_libs, genes):
 
 
 def init_of(only):
-    """joint_gene is warm-started from joint, so running it also needs joint."""
-    return "joint" if only is not None and "joint_gene" in only else None
+    """joint_gene and the pooled fits are warm-started from joint, so running them also needs joint."""
+    return "joint" if only is not None and any(f == "joint_gene" or "pool" in f for f in only) else None
 
 
 def main(sr_dirs, kdir, ref_dir, out_dir, lr_train_fraction, test_fraction=0.1, sr_fraction=1.0, min_cells=100,
@@ -94,15 +98,21 @@ def main(sr_dirs, kdir, ref_dir, out_dir, lr_train_fraction, test_fraction=0.1, 
     rows, summary, tpm, saved = [], [], {}, {}
     inits = {}
     both = {**sr_libs, **lr_libs}
-    for fit, lib_dict, use_models, use_length, pg, init in [
-            ("LR", lr_libs, True, False, False, None),
-            ("joint_plain", both, False, False, False, None),
-            ("joint", both, True, True, False, "joint_plain"),
-            ("joint_gene", both, True, True, True, "joint")]:
+    configs = [("LR", lr_libs, True, False, False, None, None),
+               ("joint_plain", both, False, False, False, None, None),
+               ("joint", both, True, True, False, None, "joint_plain"),
+               ("joint_gene", both, True, True, True, None, "joint")]
+    for f in sorted(only or []):
+        m = re.fullmatch(r"joint_(g|t)pool_t([0-9.]+)", f)
+        if m:
+            configs.append((f, both, True, True, False, ({"g": "gene", "t": "transcript"}[m.group(1)],
+                                                          float(m.group(2))), "joint"))
+    for fit, lib_dict, use_models, use_length, pg, pool, init in configs:
         if only is not None and fit not in only and fit != "joint_plain" and fit != init_of(only):
             continue
         t0 = time.time()
-        out = jc.fit_one(ctx, lib_dict, use_models, use_length, init=inits.get(init), platform_genes=pg)
+        out = jc.fit_one(ctx, lib_dict, use_models, use_length, init=inits.get(init), platform_genes=pg,
+                         pool=None if pool is None else pool[0], pool_tau=1.0 if pool is None else pool[1])
         res = out["res"]
         inits[fit] = (out["present"], res.theta)
         if fit == "joint_plain":
@@ -110,7 +120,7 @@ def main(sr_dirs, kdir, ref_dir, out_dir, lr_train_fraction, test_fraction=0.1, 
         else:
             rows.append(score(ctx, fit, out, lr_test, genes))
             saved[fit] = {"present": out["present"], "theta": res.theta, "lr_models": out["lr_models"],
-                          "lr_length": out["lr_length"], "platform_genes": pg}
+                          "lr_length": out["lr_length"], "platform_genes": pg, "pool": pool}
             for i, u in enumerate(out["present"]):
                 tpm[f"{fit}|{'@'.join(u) if isinstance(u, tuple) else u}"] = molar_to_tpm(res.theta[i])
         summary.append({"fit": fit, "lr_train_fraction": float(lr_train_fraction), "n_libraries": len(out["keys"]),

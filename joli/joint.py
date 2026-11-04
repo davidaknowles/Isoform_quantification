@@ -151,13 +151,18 @@ class JointEM:
                     updates of G and psi (tie_iter rounds; one round already raises the MM surrogate).
         groups    : (T_full,) int -- group (gene) per transcript for tie; negative values get a
                     group of their own.
+        pool      : None | "gene" | "transcript" -- partial pooling across units with the same tie
+                    label instead of exact sharing. "gene": theta_ut = G_ug psi_jt with shared psi and
+                    log G_ug ~ N(log H_jg + s_u, pool_tau^2); "transcript": log theta_ut ~ N(eta_jt + c_u,
+                    pool_tau^2). Small pool_tau approaches a shared theta, large pool_tau separate units
+                    (gene: shared psi with free gene totals). MAP by MM with Newton steps on the logs.
         backend   : "auto" | "numpy" | "rust" -- E-step implementation; "auto" uses the
                     compiled kernels (joli.native, rust/joli_kernels) when built.
         threads   : int | None -- threads for the compiled kernels.
     """
 
     def __init__(self, libraries, pi=None, units=None, unit_names=None, backend="auto", threads=None,
-                 sort_ecs=True, tie=None, groups=None, tie_iter=1):
+                 sort_ecs=True, tie=None, groups=None, tie_iter=1, pool=None, pool_tau=1.0):
         from . import native
         if backend == "auto":
             backend = "rust" if native.available() else "numpy"
@@ -216,6 +221,13 @@ class JointEM:
         self._G = np.empty((self.L, self.T))  # per-library gradients g_l (L, T), row self._row[l]
         self._N = np.array([fl.N for fl in self.libs])
         self._tie = None
+        self._pool = None
+        if pool is not None:
+            if tie is None or (pool == "gene" and groups is None):
+                raise ValueError("pool needs tie (and groups for gene-level pooling)")
+            self._pool = {"level": pool, "tau2": float(pool_tau) ** 2, "state": None}
+            if groups is None:
+                groups = np.arange(self.T_full)
         if tie is not None:
             g = np.asarray(groups, dtype=np.int64)[self.cols].copy()
             lone = g < 0
@@ -439,6 +451,12 @@ class JointEM:
         if self._tie is not None:
             if a is not None:
                 raise NotImplementedError("tied fractions with a Dirichlet prior")
+            if self._pool is not None and self._pool["level"] == "transcript":
+                new, lp = self._pooled_transcript_mstep(theta, Z, D)
+                return new, ll + lp
+            if self._pool is not None:
+                new, lp = self._tied_mstep(theta, Z, D, pooled=True)
+                return new, ll + lp
             return self._tied_mstep(theta, Z, D), ll
         if a is None:
             num = Z
@@ -455,7 +473,7 @@ class JointEM:
         new /= new.sum(axis=1, keepdims=True)
         return new, ll
 
-    def _tied_mstep(self, theta, Z, D):
+    def _tied_mstep(self, theta, Z, D, pooled=False):
         """
         MM step for theta_ut = G_ug psi_jt (j = tie(u), g = group(t)): coordinate ascent on
         Q = sum_ut Z_ut log theta_ut - D_ut theta_ut (the likelihood is invariant to each unit's
@@ -477,18 +495,81 @@ class JointEM:
         Zg = agg(Z)
         psi = div(M @ theta, M @ Gu[:, gc])
         Zj = M @ Z
+        lp = 0.0
+        if pooled:
+            # log-normal prior on gene totals around a shared profile: state (h (n_tie, n_g), s (K,))
+            gact = agg(self._activef) > 0                                  # groups active per unit
+            y = np.log(np.maximum(Gu, 1e-300))
+            st = self._pool["state"]
+            if st is None:
+                st = self._lognormal_profile(y, gact, tie, M)
+            lp = self._lognormal_logprior(y, st, gact, tie)
         for _ in range(n_iter):
-            Gu = div(Zg, agg(D * psi[tie]))
-            # tiny floor so a unit keeps the shared fractions psi in groups it has no reads for
-            Gu += 1e-9 * Gu.sum(axis=1, keepdims=True) / n_g
+            if pooled:
+                Dg = agg(D * psi[tie])
+                y = _newton_lognormal(y, Zg, Dg, st[0][tie] + st[1][:, None], self._pool["tau2"], gact)
+                st = self._lognormal_profile(y, gact, tie, M)
+                Gu = np.where(gact, np.exp(y), 0.0)
+            else:
+                Gu = div(Zg, agg(D * psi[tie]))
+                # tiny floor so a unit keeps the shared fractions psi in groups it has no reads for
+                Gu += 1e-9 * Gu.sum(axis=1, keepdims=True) / n_g
             psi = div(Zj, M @ (D * Gu[:, gc]))
             tot = agg(psi)                                                # gauge: psi sums to 1 in groups
             psi = div(psi, tot[:, gc])
             Gu *= tot[tie]
+            if pooled:
+                y = np.log(np.maximum(Gu, 1e-300))
         new = Gu[:, gc] * psi[tie]
         new *= self._activef
         new /= new.sum(axis=1, keepdims=True)
+        if pooled:
+            self._pool["state"] = st
+            return new, lp
         return new
+
+    def _lognormal_profile(self, y, act, tie, M):
+        """Shared profile h_j = mean_{u in j}(y_u - s_u) and unit offsets s_u = mean_t (y_ut - h_jt) over
+        active entries (a few alternating rounds; mean of s within each tie group fixed at 0)."""
+        a = act.astype(np.float64)
+        s = np.zeros(self.K)
+        for _ in range(3):
+            h = np.divide(M @ (np.where(act, y, 0.0) - s[:, None] * a), M @ a,
+                          out=np.zeros((M.shape[0], y.shape[1])), where=(M @ a) > 0)
+            r = np.where(act, y - h[tie], 0.0)
+            s = r.sum(axis=1) / np.maximum(a.sum(axis=1), 1.0)
+            sm = (M @ s) / np.maximum(M.sum(axis=1), 1.0)
+            s -= sm[tie]
+        return h, s
+
+    def _lognormal_logprior(self, y, st, act, tie):
+        r = np.where(act, y - st[0][tie] - st[1][:, None], 0.0)
+        return float(-0.5 * (r * r).sum() / self._pool["tau2"])
+
+    def _pooled_transcript_mstep(self, theta, Z, D):
+        """
+        MAP-MM step for log theta_ut ~ N(eta_jt + c_u, tau^2) (j = tie(u)): Newton steps on
+        x = log theta for Q = sum Z x - D e^x + log prior, then the profile (eta, c). Units of a tie
+        group share their active set, so transcripts without reads in a unit get abundance from
+        the other units of its group through eta.
+        """
+        tie = self._tie[0]
+        if getattr(self, "_tie_mats", None) is None or self._tie_mats[1].shape[1] != self.K:
+            M = np.zeros((int(tie.max()) + 1, self.K))
+            M[tie, np.arange(self.K)] = 1.0
+            self._tie_mats = (None, M)
+        M = self._tie_mats[1]
+        act = self.active
+        x = np.log(np.maximum(theta, 1e-300))
+        st = self._pool["state"] or self._lognormal_profile(x, act, tie, M)
+        lp = self._lognormal_logprior(x, st, act, tie)
+        x = _newton_lognormal(x, Z, D, st[0][tie] + st[1][:, None], self._pool["tau2"], act)
+        st = self._lognormal_profile(x, act, tie, M)
+        self._pool["state"] = st
+        x = np.where(act, x, -np.inf)
+        new = np.exp(x - x.max(axis=1, keepdims=True))
+        new /= new.sum(axis=1, keepdims=True)
+        return new, lp
 
     def run(self, prior=None, init_theta=None, max_iter=5000, min_iter=20,
             rel_tol=1e-2, theta_floor=1e-8, accelerate=True, zero_below=0.01,
@@ -596,3 +677,30 @@ def library_from_tcc(name, tcc, platform, eff_lens=None) -> Library:
 def molar_to_tpm(theta: np.ndarray) -> np.ndarray:
     """Molar fractions (..., T) to TPM."""
     return 1e6 * theta / theta.sum(axis=-1, keepdims=True)
+
+
+def _newton_lognormal(x, Z, Dw, m, tau2, act, n_newton=4):
+    """
+    Elementwise maximisation of f(x) = Z x - Dw e^x - (x - m)^2 / (2 tau2) (concave) by Newton
+    steps with step halving, from x; entries outside act are left unchanged.
+    """
+    f = lambda v: Z * v - Dw * np.exp(np.minimum(v, 700.0)) - (v - m) ** 2 / (2.0 * tau2)
+    x = np.where(act, np.maximum(x, m - 50.0), x)
+    fx = f(x)
+    for _ in range(n_newton):
+        ex = np.exp(np.minimum(x, 700.0))
+        g = Z - Dw * ex - (x - m) / tau2
+        h = -Dw * ex - 1.0 / tau2
+        step = -g / h
+        t = np.ones_like(x)
+        for _ in range(8):
+            xn = x + t * step
+            fn = f(xn)
+            bad = act & (fn < fx)
+            if not bad.any():
+                break
+            t = np.where(bad, 0.5 * t, t)
+        ok = act & (fn >= fx)
+        x = np.where(ok, xn, x)
+        fx = np.where(ok, fn, fx)
+    return x

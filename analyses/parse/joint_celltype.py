@@ -210,14 +210,17 @@ def build_libraries(ctx, sr_fraction, lr_fraction, lr_test_fraction=0.0):
     return sr_libs, lr_libs, lr_test
 
 
-def fit_one(ctx, lib_dict, use_models, use_length, init=None, verbose=True, platform_genes=False):
+def fit_one(ctx, lib_dict, use_models, use_length, init=None, verbose=True, platform_genes=False, pool=None,
+            pool_tau=1.0):
     """
     Fit one configuration. Bias models are shared per platform x primer/kit: SR position profiles
     (poly(dT): distance to the 3' end; hexamer: relative position) and the SR poly(dT) unspliced
     scale; per LR kit an AnchoredTruncationModel and a LengthBias with an unspliced scale.
     Units are cell types, or with platform_genes (cell type, platform) pairs whose abundances
     share within-gene fractions but have platform-specific gene totals (JointEM tie/groups;
-    unspliced targets are groups of their own).
+    unspliced targets are groups of their own). pool ("gene" | "transcript") instead shrinks the
+    platforms' gene totals (with shared within-gene fractions) or transcript abundances towards a
+    shared cell-type profile with log-scale sd pool_tau (JointEM pool).
     init: (unit labels, theta) of an earlier fit; per-cell-type abundances are copied to both
     platforms of a platform_genes fit.
     Returns dict with res, present (unit labels), label (library key -> unit label), keys and models.
@@ -230,6 +233,7 @@ def fit_one(ctx, lib_dict, use_models, use_length, init=None, verbose=True, plat
     sr_kappa = LengthBias(tx_len, extra=unspliced[:, None], length_terms=False, ridge=1e-3) if use_length else None
     keys = sorted(lib_dict)
     libs = [lib_dict[k] for k in keys]
+    platform_genes = platform_genes or pool is not None
     label = (lambda k: (k.split("|")[0], k.split("|")[1])) if platform_genes else (lambda k: k.split("|")[0])
     trunc, length = {}, {}
     if use_models:
@@ -249,7 +253,7 @@ def fit_one(ctx, lib_dict, use_models, use_length, init=None, verbose=True, plat
     pi[np.arange(len(libs)), [local[label(k)] for k in keys]] = 1.0
     tie = [unit_idx[u[0]] for u in present] if platform_genes else None
     em = JointEM(libs, pi=pi, unit_names=["@".join(u) if platform_genes else u for u in present],
-                 tie=tie, groups=ctx["gene_groups"] if platform_genes else None)
+                 tie=tie, groups=ctx["gene_groups"] if platform_genes else None, pool=pool, pool_tau=pool_tau)
     init_theta = None
     if init is not None:
         imap = {u: i for i, u in enumerate(init[0])}
