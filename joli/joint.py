@@ -155,7 +155,9 @@ class JointEM:
                     label instead of exact sharing. "gene": theta_ut = G_ug psi_jt with shared psi and
                     log G_ug ~ N(log H_jg + s_u, pool_tau^2); "transcript": log theta_ut ~ N(eta_jt + c_u,
                     pool_tau^2). Small pool_tau approaches a shared theta, large pool_tau separate units
-                    (gene: shared psi with free gene totals). MAP by MM with Newton steps on the logs.
+                    (gene: shared psi with free gene totals). MAP by MM with Newton steps on the logs; the
+                    profile (shared means and unit offsets) is maximised out, so the objective is a
+                    function of theta.
         backend   : "auto" | "numpy" | "rust" -- E-step implementation; "auto" uses the
                     compiled kernels (joli.native, rust/joli_kernels) when built.
         threads   : int | None -- threads for the compiled kernels.
@@ -500,9 +502,8 @@ class JointEM:
             # log-normal prior on gene totals around a shared profile: state (h (n_tie, n_g), s (K,))
             gact = agg(self._activef) > 0                                  # groups active per unit
             y = np.log(np.maximum(Gu, 1e-300))
-            st = self._pooling["state"]
-            if st is None:
-                st = self._lognormal_profile(y, gact, tie, M)
+            # profile (h, s) maximised at the input, so the objective depends on theta alone
+            st = self._lognormal_profile(y, gact, tie, M)
             lp = self._lognormal_logprior(y, st, gact, tie)
         for _ in range(n_iter):
             if pooled:
@@ -561,7 +562,8 @@ class JointEM:
         M = self._tie_mats[1]
         act = self.active
         x = np.log(np.maximum(theta, 1e-300))
-        st = self._pooling["state"] or self._lognormal_profile(x, act, tie, M)
+        # profile (eta, c) maximised at the input, so the objective depends on theta alone
+        st = self._lognormal_profile(x, act, tie, M)
         lp = self._lognormal_logprior(x, st, act, tie)
         x = _newton_lognormal(x, Z, D, st[0][tie] + st[1][:, None], self._pooling["tau2"], act)
         st = self._lognormal_profile(x, act, tie, M)
@@ -634,8 +636,9 @@ class JointEM:
                     n_steps += 1
                     if llp >= ll1:
                         new = t3
+            # a small non-negative gain (a decrease, e.g. after a rejected extrapolation, is not convergence)
             ll_stall = (ll_rel_tol is not None and len(history) > 0
-                        and ll0 - history[-1] < ll_rel_tol * abs(ll0))
+                        and 0.0 <= ll0 - history[-1] < ll_rel_tol * abs(ll0))
             history.append(ll0)
             diff = np.abs(new - theta)
             changed = int(np.count_nonzero((new > theta_floor) & (diff > rel_tol * new)))

@@ -315,3 +315,17 @@ def test_pooled_fit_with_thread_pool():
         assert sum(len(f.tx) for f in em.libs) >= 1_000_000
         res = em.run(max_iter=6, min_iter=6)
         assert np.isfinite(res.loglik[-1])
+
+
+def test_pooled_fit_with_stopping_rule_converges():
+    """Accelerated pooled fits with the log-posterior stopping rule reach the unaccelerated solution
+    (regression: the objective depended on stored profile state and decreases counted as convergence)."""
+    from joli.joint import JointEM
+    libs, gene, _ = _two_platforms(np.random.default_rng(4), G=60, gene_shift=1.0)
+    for level in ["transcript", "gene"]:
+        mk = lambda: JointEM(libs, units=[0, 1], tie=[0, 0], groups=gene, pool=level, pool_tau=0.5)
+        ref = mk().run(rel_tol=1e-9, max_iter=50000, zero_below=None, accelerate=False)
+        fast = mk().run(rel_tol=1e-2, ll_rel_tol=1e-10, max_iter=50000, zero_below=None)
+        assert _close_theta(fast.theta, ref.theta, 0.01), level
+        lp = np.array(ref.loglik[:-1])
+        assert (np.diff(lp) > -1e-6 * abs(lp[-1])).all(), level
