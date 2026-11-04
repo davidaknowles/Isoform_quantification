@@ -292,3 +292,26 @@ def test_pooled_fit_increases_log_posterior():
             rel_tol=1e-7, max_iter=20000, zero_below=None, accelerate=False)
         lp = np.array(res.loglik[:-1])
         assert (np.diff(lp[1:]) > -1e-6 * abs(lp[-1])).all(), level
+
+
+def test_pooled_fit_with_thread_pool():
+    """Pooled fits on libraries large enough for the threaded E-step (regression: attribute clash)."""
+    from joli.joint import JointEM, Library
+    from joli.load_tcc import TCCData, FlatECs
+    rng = np.random.default_rng(9)
+    T = 2000
+    names = [f"t{i}" for i in range(T)]
+    gene = np.arange(T) // 4
+    libs = []
+    for l in range(2):
+        sizes = rng.integers(1, 4, size=300000)
+        ptr = np.r_[0, np.cumsum(sizes)]
+        tcc = TCCData(ec_counts=rng.integers(1, 5, len(sizes)).astype(float),
+                      ec_transcripts=FlatECs(ptr, rng.integers(0, T, ptr[-1]).astype(np.int32)),
+                      transcript_names=names, total_reads=0, n_targets=T, sample_dir="")
+        libs.append(Library(f"l{l}", tcc, b=np.ones(T)))
+    for level in ["gene", "transcript"]:
+        em = JointEM(libs, units=[0, 1], tie=[0, 0], groups=gene, pool=level, pool_tau=1.0, threads=2)
+        assert sum(len(f.tx) for f in em.libs) >= 1_000_000
+        res = em.run(max_iter=6, min_iter=6)
+        assert np.isfinite(res.loglik[-1])

@@ -221,11 +221,11 @@ class JointEM:
         self._G = np.empty((self.L, self.T))  # per-library gradients g_l (L, T), row self._row[l]
         self._N = np.array([fl.N for fl in self.libs])
         self._tie = None
-        self._pool = None
+        self._pooling = None
         if pool is not None:
             if tie is None or (pool == "gene" and groups is None):
                 raise ValueError("pool needs tie (and groups for gene-level pooling)")
-            self._pool = {"level": pool, "tau2": float(pool_tau) ** 2, "state": None}
+            self._pooling = {"level": pool, "tau2": float(pool_tau) ** 2, "state": None}
             if groups is None:
                 groups = np.arange(self.T_full)
         if tie is not None:
@@ -451,10 +451,10 @@ class JointEM:
         if self._tie is not None:
             if a is not None:
                 raise NotImplementedError("tied fractions with a Dirichlet prior")
-            if self._pool is not None and self._pool["level"] == "transcript":
+            if self._pooling is not None and self._pooling["level"] == "transcript":
                 new, lp = self._pooled_transcript_mstep(theta, Z, D)
                 return new, ll + lp
-            if self._pool is not None:
+            if self._pooling is not None:
                 new, lp = self._tied_mstep(theta, Z, D, pooled=True)
                 return new, ll + lp
             return self._tied_mstep(theta, Z, D), ll
@@ -500,14 +500,14 @@ class JointEM:
             # log-normal prior on gene totals around a shared profile: state (h (n_tie, n_g), s (K,))
             gact = agg(self._activef) > 0                                  # groups active per unit
             y = np.log(np.maximum(Gu, 1e-300))
-            st = self._pool["state"]
+            st = self._pooling["state"]
             if st is None:
                 st = self._lognormal_profile(y, gact, tie, M)
             lp = self._lognormal_logprior(y, st, gact, tie)
         for _ in range(n_iter):
             if pooled:
                 Dg = agg(D * psi[tie])
-                y = _newton_lognormal(y, Zg, Dg, st[0][tie] + st[1][:, None], self._pool["tau2"], gact)
+                y = _newton_lognormal(y, Zg, Dg, st[0][tie] + st[1][:, None], self._pooling["tau2"], gact)
                 st = self._lognormal_profile(y, gact, tie, M)
                 Gu = np.where(gact, np.exp(y), 0.0)
             else:
@@ -524,7 +524,7 @@ class JointEM:
         new *= self._activef
         new /= new.sum(axis=1, keepdims=True)
         if pooled:
-            self._pool["state"] = st
+            self._pooling["state"] = st
             return new, lp
         return new
 
@@ -544,7 +544,7 @@ class JointEM:
 
     def _lognormal_logprior(self, y, st, act, tie):
         r = np.where(act, y - st[0][tie] - st[1][:, None], 0.0)
-        return float(-0.5 * (r * r).sum() / self._pool["tau2"])
+        return float(-0.5 * (r * r).sum() / self._pooling["tau2"])
 
     def _pooled_transcript_mstep(self, theta, Z, D):
         """
@@ -561,11 +561,11 @@ class JointEM:
         M = self._tie_mats[1]
         act = self.active
         x = np.log(np.maximum(theta, 1e-300))
-        st = self._pool["state"] or self._lognormal_profile(x, act, tie, M)
+        st = self._pooling["state"] or self._lognormal_profile(x, act, tie, M)
         lp = self._lognormal_logprior(x, st, act, tie)
-        x = _newton_lognormal(x, Z, D, st[0][tie] + st[1][:, None], self._pool["tau2"], act)
+        x = _newton_lognormal(x, Z, D, st[0][tie] + st[1][:, None], self._pooling["tau2"], act)
         st = self._lognormal_profile(x, act, tie, M)
-        self._pool["state"] = st
+        self._pooling["state"] = st
         x = np.where(act, x, -np.inf)
         new = np.exp(x - x.max(axis=1, keepdims=True))
         new /= new.sum(axis=1, keepdims=True)
