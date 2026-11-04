@@ -185,8 +185,13 @@ def prepare(sr_dirs, kdir, ref_dir, min_cells=100):
         plat, kit = g.split("|")[1:3]
         return primer_rates(kit.split("@")[0], tx_len, SR_READ_LEN if plat == "SR" else 0, unspliced, kappa=KAPPA0)
     keep_g = lambda gs: {g: rate(g) for g in set(x for x in gs if x is not None) if g.split("|")[0] in unit_idx}
+    # gene groups for platform-specific gene totals: unspliced targets form groups of their own
+    t2g = pd.read_csv(ref_dir / "t2g.tsv", sep="\t", header=None, index_col=0)[1]
+    gcode = pd.factorize(t2g.reindex(names))[0]
+    n_genes = int(gcode.max()) + 1
+    gene_groups = np.where(gcode < 0, -1, gcode + np.where(unspliced, n_genes, 0))
     return dict(names=names, tx_len=tx_len, unspliced=unspliced, sr_src=sr_src, lr_src=lr_src,
-                units=units, unit_idx=unit_idx, keep_g=keep_g)
+                units=units, unit_idx=unit_idx, keep_g=keep_g, genes=gcode, gene_groups=gene_groups)
 
 
 def build_libraries(ctx, sr_fraction, lr_fraction, lr_test_fraction=0.0):
@@ -205,13 +210,17 @@ def build_libraries(ctx, sr_fraction, lr_fraction, lr_test_fraction=0.0):
     return sr_libs, lr_libs, lr_test
 
 
-def fit_one(ctx, lib_dict, use_models, use_length, init=None, verbose=True):
+def fit_one(ctx, lib_dict, use_models, use_length, init=None, verbose=True, platform_genes=False):
     """
     Fit one configuration. Bias models are shared per platform x primer/kit: SR position profiles
     (poly(dT): distance to the 3' end; hexamer: relative position) and the SR poly(dT) unspliced
     scale; per LR kit an AnchoredTruncationModel and a LengthBias with an unspliced scale.
-    init: (present units, theta) of an earlier fit on the same units, or None.
-    Returns dict with res, present (unit indices), keys (library keys), and the fitted models.
+    Units are cell types, or with platform_genes (cell type, platform) pairs whose abundances
+    share within-gene fractions but have platform-specific gene totals (JointEM tie/groups;
+    unspliced targets are groups of their own).
+    init: (unit labels, theta) of an earlier fit; per-cell-type abundances are copied to both
+    platforms of a platform_genes fit.
+    Returns dict with res, present (unit labels), label (library key -> unit label), keys and models.
     """
     tx_len, unspliced, unit_idx = ctx["tx_len"], ctx["unspliced"], ctx["unit_idx"]
     sr_models = {"poly(dT)": FeatureColumns(ReadPositionModel(tx_len, SR_READ_LEN, "3p", uniform=unspliced), [0]),
@@ -221,7 +230,7 @@ def fit_one(ctx, lib_dict, use_models, use_length, init=None, verbose=True):
     sr_kappa = LengthBias(tx_len, extra=unspliced[:, None], length_terms=False, ridge=1e-3) if use_length else None
     keys = sorted(lib_dict)
     libs = [lib_dict[k] for k in keys]
-    unit_of = [unit_idx[k.split("|")[0]] for k in keys]
+    label = (lambda k: (k.split("|")[0], k.split("|")[1])) if platform_genes else (lambda k: k.split("|")[0])
     trunc, length = {}, {}
     if use_models:
         for i, k in enumerate(keys):
@@ -234,17 +243,24 @@ def fit_one(ctx, lib_dict, use_models, use_length, init=None, verbose=True):
                 trunc[i] = lr_models.setdefault(primer, AnchoredTruncationModel(tx_len, uniform=unspliced))
                 if lr_length is not None:
                     length[i] = lr_length.setdefault(primer, LengthBias(tx_len, extra=unspliced[:, None], ridge_extra=1e-3))
-    present = sorted(set(unit_of))
-    local = {k: i for i, k in enumerate(present)}
+    present = sorted({label(k) for k in keys})
+    local = {u: i for i, u in enumerate(present)}
     pi = np.zeros((len(libs), len(present)))
-    pi[np.arange(len(libs)), [local[k] for k in unit_of]] = 1.0
-    em = JointEM(libs, pi=pi, unit_names=[ctx["units"][k] for k in present])
-    init_theta = np.maximum(init[1], 1e-10) if init is not None and init[0] == present else None
+    pi[np.arange(len(libs)), [local[label(k)] for k in keys]] = 1.0
+    tie = [unit_idx[u[0]] for u in present] if platform_genes else None
+    em = JointEM(libs, pi=pi, unit_names=["@".join(u) if platform_genes else u for u in present],
+                 tie=tie, groups=ctx["gene_groups"] if platform_genes else None)
+    init_theta = None
+    if init is not None:
+        imap = {u: i for i, u in enumerate(init[0])}
+        rows = [imap.get(u, imap.get(u[0]) if isinstance(u, tuple) else None) for u in present]
+        if all(r is not None for r in rows):
+            init_theta = np.maximum(init[1][rows], 1e-10)
     if trunc or length:
         res = fit_bias(em, trunc=trunc, length=length, n_outer=8, verbose=verbose, run_kw=RUN_KW, init_theta=init_theta)
     else:
         res = em.run(init_theta=init_theta, **RUN_KW)
-    return dict(res=res, present=present, keys=keys, sr_models=sr_models, lr_models=lr_models,
+    return dict(res=res, present=present, label=label, keys=keys, sr_models=sr_models, lr_models=lr_models,
                 lr_length=lr_length, sr_kappa=sr_kappa)
 
 
@@ -266,8 +282,8 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
         out = fit_one(ctx, lib_dict, use_models, use_length, init=done.get("joint_plain") if fit == "joint" else None)
         res, present = out["res"], out["present"]
         done[fit] = (present, res.theta)
-        for i, k in enumerate(present):
-            tpm[f"{fit}|{units[k]}"] = molar_to_tpm(res.theta[i])
+        for i, u in enumerate(present):
+            tpm[f"{fit}|{'@'.join(u) if isinstance(u, tuple) else u}"] = molar_to_tpm(res.theta[i])
         if use_models:
             bias.append(bias_table(fit, out))
         sr_kappa = out["sr_kappa"]

@@ -6,6 +6,8 @@ from every LR library. Fits use a training fraction of the remaining molecules:
   LR     long reads alone, with the read-end model (AnchoredTruncationModel) per kit
   joint  all short reads + training long reads, with all bias models
          (warm-started from the same libraries without bias models)
+  joint_gene  as joint, with platform-specific gene totals and within-gene fractions
+         shared across platforms (units cell type x platform; warm-started from joint)
 Each held-out LR library (cell type x kit x source library) is scored at the fit's
 abundances for its cell type and the fit's bias models for its kit:
 ll = sum_e n_e log sum_t mu_t c_et - N log sum_t mu_t b_t, over ECs with read-end
@@ -22,7 +24,7 @@ Writes {out_dir}/heldout.tsv (fit x held-out library), fits.tsv, tpm.tsv.gz and 
 (abundances and LR bias models per fit, for scoring without refitting).
 
 Run: python analyses/parse/heldout_lr.py <sr_series_dirs> <lr_dirs> <ref_dir> <out_dir>
-                                         <lr_train_fraction> [test_fraction] [sr_fraction] [min_cells]
+                                         <lr_train_fraction> [test_fraction] [sr_fraction] [min_cells] [fits]
 """
 
 import pickle
@@ -44,13 +46,13 @@ EPS = (1e-6, 1e-9)
 
 def score(ctx, fit, out, test_libs, genes):
     """Held-out log-likelihood per test library under one fit (units the fit covers)."""
-    res, present = out["res"], out["present"]
-    local = {k: i for i, k in enumerate(present)}
-    keys = [k for k in sorted(test_libs) if ctx["unit_idx"][k.split("|")[0]] in local]
+    res, present, label = out["res"], out["present"], out["label"]
+    local = {u: i for i, u in enumerate(present)}
+    keys = [k for k in sorted(test_libs) if label(k) in local]
     libs = [test_libs[k] for k in keys]
     pi = np.zeros((len(libs), len(present)))
-    pi[np.arange(len(libs)), [local[ctx["unit_idx"][k.split("|")[0]]] for k in keys]] = 1.0
-    em = JointEM(libs, pi=pi, unit_names=[ctx["units"][k] for k in present])
+    pi[np.arange(len(libs)), [local[label(k)] for k in keys]] = 1.0
+    em = JointEM(libs, pi=pi)
     for l, k in enumerate(keys):
         kit = k.split("|")[2]
         fl = em.libs[l]
@@ -72,7 +74,15 @@ def score(ctx, fit, out, test_libs, genes):
     return pd.DataFrame(rows.values())
 
 
-def main(sr_dirs, kdir, ref_dir, out_dir, lr_train_fraction, test_fraction=0.1, sr_fraction=1.0, min_cells=100):
+def init_of(only):
+    """joint_gene is warm-started from joint, so running it also needs joint."""
+    return "joint" if only is not None and "joint_gene" in only else None
+
+
+def main(sr_dirs, kdir, ref_dir, out_dir, lr_train_fraction, test_fraction=0.1, sr_fraction=1.0, min_cells=100,
+         only=None):
+    """only: comma-separated fits to run (default all); joint_plain always runs as a warm start."""
+    only = None if only is None else set(only.split(","))
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     ctx = jc.prepare(sr_dirs, kdir, ref_dir, min_cells)
@@ -82,21 +92,27 @@ def main(sr_dirs, kdir, ref_dir, out_dir, lr_train_fraction, test_fraction=0.1, 
     t2g = pd.read_csv(Path(ref_dir) / "t2g.tsv", sep="\t", header=None, index_col=0)[1]
     genes = pd.factorize(t2g.reindex(ctx["names"]))[0]                 # -1 where unmapped
     rows, summary, tpm, saved = [], [], {}, {}
-    plain = None
-    for fit, lib_dict, use_models, use_length in [("LR", lr_libs, True, False),
-                                                   ("joint_plain", {**sr_libs, **lr_libs}, False, False),
-                                                   ("joint", {**sr_libs, **lr_libs}, True, True)]:
+    inits = {}
+    both = {**sr_libs, **lr_libs}
+    for fit, lib_dict, use_models, use_length, pg, init in [
+            ("LR", lr_libs, True, False, False, None),
+            ("joint_plain", both, False, False, False, None),
+            ("joint", both, True, True, False, "joint_plain"),
+            ("joint_gene", both, True, True, True, "joint")]:
+        if only is not None and fit not in only and fit != "joint_plain" and fit != init_of(only):
+            continue
         t0 = time.time()
-        out = jc.fit_one(ctx, lib_dict, use_models, use_length, init=plain if fit == "joint" else None)
+        out = jc.fit_one(ctx, lib_dict, use_models, use_length, init=inits.get(init), platform_genes=pg)
         res = out["res"]
+        inits[fit] = (out["present"], res.theta)
         if fit == "joint_plain":
-            plain = (out["present"], res.theta)      # warm start only: no read-end model, not scored
+            pass                                     # warm start only: no read-end model, not scored
         else:
             rows.append(score(ctx, fit, out, lr_test, genes))
             saved[fit] = {"present": out["present"], "theta": res.theta, "lr_models": out["lr_models"],
-                          "lr_length": out["lr_length"]}
-            for i, k in enumerate(out["present"]):
-                tpm[f"{fit}|{ctx['units'][k]}"] = molar_to_tpm(res.theta[i])
+                          "lr_length": out["lr_length"], "platform_genes": pg}
+            for i, u in enumerate(out["present"]):
+                tpm[f"{fit}|{'@'.join(u) if isinstance(u, tuple) else u}"] = molar_to_tpm(res.theta[i])
         summary.append({"fit": fit, "lr_train_fraction": float(lr_train_fraction), "n_libraries": len(out["keys"]),
                         "units": len(out["present"]), "loglik": res.loglik[-1], "n_iter": res.n_iter,
                         "converged": res.converged, "seconds": round(time.time() - t0, 1)})
@@ -108,11 +124,15 @@ def main(sr_dirs, kdir, ref_dir, out_dir, lr_train_fraction, test_fraction=0.1, 
     pd.DataFrame(tpm, index=ctx["names"]).to_csv(out_dir / "tpm.tsv.gz", sep="\t", float_format="%.6g")
     with open(out_dir / "fits.pkl", "wb") as fh:
         pickle.dump({"units": ctx["units"], "fits": saved}, fh)
-    both = h.pivot_table(index="library", columns="fit", values=f"ll_eps{EPS[0]:g}").dropna()
-    n = h.drop_duplicates("library").set_index("library")["molecules"].reindex(both.index)
-    print(f"held-out LR log-likelihood per molecule, joint - LR, over {len(both)} libraries: "
-          f"{(both['joint'] - both['LR']).sum() / n.sum():.4f}", flush=True)
+    wide = h.pivot_table(index="library", columns="fit", values=f"ll_eps{EPS[0]:g}").dropna()
+    n = h.drop_duplicates("library").set_index("library")["molecules"].reindex(wide.index)
+    for f in [c for c in wide.columns if c != "LR"]:
+        if "LR" in wide.columns:
+            print(f"held-out LR log-likelihood per molecule, {f} - LR, over {len(wide)} libraries: "
+                  f"{(wide[f] - wide['LR']).sum() / n.sum():.4f}", flush=True)
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:6], *(float(x) if i < 2 else int(x) for i, x in enumerate(sys.argv[6:9])))
+    args = sys.argv[6:]
+    conv = [float, float, int, str]
+    main(*sys.argv[1:6], *(conv[i](x) for i, x in enumerate(args)))

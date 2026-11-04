@@ -48,31 +48,35 @@ def main(d):
                          columns="fit", values="ll").dropna().reset_index()
     z = long.pivot_table(index=["lr_train_fraction", "eps", "score", "library"], columns="fit",
                          values="zero_prob_molecules").reset_index()
-    w = w.merge(z.rename(columns={"LR": "zero_LR", "joint": "zero_joint"}),
+    fits = [f for f in long["fit"].unique() if f != "LR"]
+    w = w.merge(z.rename(columns={f: f"zero_{f}" for f in ["LR"] + fits}),
                 on=["lr_train_fraction", "eps", "score", "library"])
+    # long format over the fits compared with LR alone
+    w = pd.concat([w.assign(fit=f, other=w[f], zero_other=w[f"zero_{f}"]) for f in fits if f in w.columns],
+                  ignore_index=True)
 
     def agg(g):
         n = g["molecules"].sum()
-        return pd.Series({"molecules": n, "ll_LR": g["LR"].sum() / n, "ll_joint": g["joint"].sum() / n,
-                          "gain_per_molecule": (g["joint"] - g["LR"]).sum() / n,
-                          "zero_share_LR": g["zero_LR"].sum() / n, "zero_share_joint": g["zero_joint"].sum() / n,
+        return pd.Series({"molecules": n, "ll_LR": g["LR"].sum() / n, "ll_fit": g["other"].sum() / n,
+                          "gain_per_molecule": (g["other"] - g["LR"]).sum() / n,
+                          "zero_share_LR": g["zero_LR"].sum() / n, "zero_share_fit": g["zero_other"].sum() / n,
                           "libraries": len(g)})
 
-    s = w.groupby(["score", "lr_train_fraction", "eps"]).apply(agg, include_groups=False).reset_index()
-    u = w.groupby(["score", "lr_train_fraction", "eps", "unit"]).apply(agg, include_groups=False).reset_index()
+    s = w.groupby(["score", "fit", "lr_train_fraction", "eps"]).apply(agg, include_groups=False).reset_index()
+    u = w.groupby(["score", "fit", "lr_train_fraction", "eps", "unit"]).apply(agg, include_groups=False).reset_index()
     s.to_csv(d / "summary.tsv", sep="\t", index=False)
     u.to_csv(d / "summary_by_unit.tsv", sep="\t", index=False)
     print(s.round(4).to_string(index=False))
 
     eps0 = sorted(s["eps"].unique(), key=float)[-1]               # larger smoothing
     p = (ggplot(u[u["eps"] == eps0], aes("lr_train_fraction", "gain_per_molecule"))
-         + facet_wrap("~score", scales="free_y")
+         + facet_wrap("~score + fit", scales="free_y")
          + geom_hline(yintercept=0, linetype="dashed")
          + geom_line(aes(group="unit"), alpha=0.4)
          + geom_point(aes(size="molecules"), alpha=0.6)
          + geom_line(data=s[s["eps"] == eps0], color="red", size=1.2)
          + scale_x_log10()
-         + labs(x="LR training fraction of molecules", y="held-out LR log-lik per molecule, joint - LR",
+         + labs(x="LR training fraction of molecules", y="held-out LR log-lik per molecule, fit - LR",
                 title=f"Short reads and prediction of held-out long reads (eps {eps0}); red: all cell types")
          + theme_bw())
     p.save(d / "heldout_gain.png", width=8, height=5, dpi=150, verbose=False)

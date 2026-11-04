@@ -38,6 +38,7 @@ library this is exactly JoliEM's MAP update (n + alpha) / (N + sum alpha).
 from dataclasses import dataclass, field
 
 import numpy as np
+import pandas as pd
 
 from .load_tcc import FlatECs, TCCData
 
@@ -143,13 +144,20 @@ class JointEM:
         unit_names: list[str] | None
         sort_ecs  : bool -- store each library's ECs ordered by smallest transcript index (memory
                     locality in the E-step; fits are unchanged).
+        tie       : (K,) int | None -- units with the same tie label share within-group fractions:
+                    theta_ut = G_{u,g(t)} psi_{tie(u),t} with unit-specific group totals G (e.g. units
+                    are cell type x platform, groups are genes, so platforms may differ in gene
+                    expression but share isoform fractions). The M-step alternates closed-form
+                    updates of G and psi (tie_iter rounds; one round already raises the MM surrogate).
+        groups    : (T_full,) int -- group (gene) per transcript for tie; negative values get a
+                    group of their own.
         backend   : "auto" | "numpy" | "rust" -- E-step implementation; "auto" uses the
                     compiled kernels (joli.native, rust/joli_kernels) when built.
         threads   : int | None -- threads for the compiled kernels.
     """
 
     def __init__(self, libraries, pi=None, units=None, unit_names=None, backend="auto", threads=None,
-                 sort_ecs=True):
+                 sort_ecs=True, tie=None, groups=None, tie_iter=1):
         from . import native
         if backend == "auto":
             backend = "rust" if native.available() else "numpy"
@@ -207,6 +215,21 @@ class JointEM:
         self._Bmat = None                     # stacked compact rates (L, T), rebuilt after set_bias
         self._G = np.empty((self.L, self.T))  # per-library gradients g_l (L, T), row self._row[l]
         self._N = np.array([fl.N for fl in self.libs])
+        self._tie = None
+        if tie is not None:
+            g = np.asarray(groups, dtype=np.int64)[self.cols].copy()
+            lone = g < 0
+            g[lone] = g.max() + 1 + np.arange(lone.sum())
+            gc, _ = pd.factorize(g)
+            tie = np.asarray(tie, dtype=np.int64)
+            if len(tie) != self.K:
+                raise ValueError("tie needs one label per unit")
+            self._tie = (pd.factorize(tie)[0], gc.astype(np.int64), int(gc.max()) + 1, int(tie_iter))
+            # units sharing fractions are active on the union of their transcripts
+            for j in np.unique(self._tie[0]):
+                us = self._tie[0] == j
+                self.active[us] = self.active[us].any(axis=0)
+            self._activef = self.active.astype(np.float64)
 
     def _compact(self, x):
         """Full-length (..., T_full) array to compact (..., T)."""
@@ -413,6 +436,10 @@ class JointEM:
     def _update(self, theta, a):
         """One MM step on compact theta. Returns (new theta, log posterior at the input theta)."""
         Z, D, ll, _ = self._estep(theta)
+        if self._tie is not None:
+            if a is not None:
+                raise NotImplementedError("tied fractions with a Dirichlet prior")
+            return self._tied_mstep(theta, Z, D), ll
         if a is None:
             num = Z
         else:
@@ -427,6 +454,41 @@ class JointEM:
         new = np.divide(num, D, out=num if a is None else None)
         new /= new.sum(axis=1, keepdims=True)
         return new, ll
+
+    def _tied_mstep(self, theta, Z, D):
+        """
+        MM step for theta_ut = G_ug psi_jt (j = tie(u), g = group(t)): coordinate ascent on
+        Q = sum_ut Z_ut log theta_ut - D_ut theta_ut (the likelihood is invariant to each unit's
+        scale, so no sum constraint), G_ug = Z_ug / sum_{t in g} D_ut psi_jt and
+        psi_jt = sum_{u in j} Z_ut / sum_{u in j} D_ut G_ug, with psi normalised within groups. G gets a
+        floor of 1e-9 of the unit's mean group total, so units keep psi in groups without their own reads.
+        """
+        tie, gc, n_g, n_iter = self._tie
+        if getattr(self, "_tie_mats", None) is None:
+            import scipy.sparse as sp
+            A = sp.csr_matrix((np.ones(self.T), (np.arange(self.T), gc)), shape=(self.T, n_g))  # transcript -> group
+            M = np.zeros((int(tie.max()) + 1, self.K))
+            M[tie, np.arange(self.K)] = 1.0                                                      # tie group x unit
+            self._tie_mats = (A, M)
+        A, M = self._tie_mats
+        agg = lambda X: np.stack([np.bincount(gc, weights=x, minlength=n_g) for x in X])   # (rows, T) -> (rows, n_g)
+        div = lambda a, b: np.divide(a, b, out=np.zeros_like(a), where=b > 0)
+        Gu = agg(theta)
+        Zg = agg(Z)
+        psi = div(M @ theta, M @ Gu[:, gc])
+        Zj = M @ Z
+        for _ in range(n_iter):
+            Gu = div(Zg, agg(D * psi[tie]))
+            # tiny floor so a unit keeps the shared fractions psi in groups it has no reads for
+            Gu += 1e-9 * Gu.sum(axis=1, keepdims=True) / n_g
+            psi = div(Zj, M @ (D * Gu[:, gc]))
+            tot = agg(psi)                                                # gauge: psi sums to 1 in groups
+            psi = div(psi, tot[:, gc])
+            Gu *= tot[tie]
+        new = Gu[:, gc] * psi[tie]
+        new *= self._activef
+        new /= new.sum(axis=1, keepdims=True)
+        return new
 
     def run(self, prior=None, init_theta=None, max_iter=5000, min_iter=20,
             rel_tol=1e-2, theta_floor=1e-8, accelerate=True, zero_below=0.01,
@@ -505,6 +567,10 @@ class JointEM:
                 break
         if zero_below is not None:
             Z, _, _, _ = self._estep(theta)
+            if self._tie is not None:              # zero by the tie group's expected reads
+                tie = self._tie[0]
+                Zj = np.stack([Z[tie == j].sum(axis=0) for j in range(int(tie.max()) + 1)])
+                Z = Zj[tie]
             theta = np.where(Z >= zero_below, theta, 0.0)
             theta /= theta.sum(axis=1, keepdims=True)
             theta, _ = self._update(theta, None if a is None else np.where(theta > 0, a, 0.0))

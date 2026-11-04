@@ -205,3 +205,60 @@ def test_library_loglik_within_one_gene_equals_conditional():
     _, used2, _ = em.library_loglik_within(th, g, eps=1e-9)
     span = [len(set(g[t])) > 1 for t in tcc.ec_transcripts]
     assert used2[0] == tcc.ec_counts[~np.array(span)].sum()
+
+
+def _ec_library(name, rng, ecs, probs, n, T, names, b):
+    from joli.joint import Library
+    from joli.load_tcc import TCCData, FlatECs
+    counts = rng.multinomial(n, probs).astype(float)
+    ptr = np.r_[0, np.cumsum([len(e) for e in ecs])]
+    tcc = TCCData(ec_counts=counts, ec_transcripts=FlatECs(ptr, np.concatenate(ecs).astype(np.int32)),
+                  transcript_names=names, total_reads=n, n_targets=T, sample_dir="")
+    return Library(name, tcc, b=b)
+
+
+def _two_platforms(rng, G=150, iso=3, gene_shift=1.0):
+    """Genes with `iso` isoforms; platform 0 resolves isoforms (few reads), platform 1 mostly
+    gene-level ECs (many reads) and gene expression shifted by lognormal(0, gene_shift)."""
+    T = G * iso
+    names = [f"t{i}" for i in range(T)]
+    gene = np.repeat(np.arange(G), iso)
+    psi = rng.dirichlet(np.ones(iso), size=G).ravel()
+    expr = rng.lognormal(0, 1, G)
+    libs = []
+    for p, (n, shift) in enumerate([(4000, 0.0), (200000, gene_shift)]):
+        e = expr * np.exp(rng.normal(0, shift, G)) if shift else expr
+        theta = e[gene] * psi
+        theta /= theta.sum()
+        if p == 0:                                    # one EC per transcript
+            ecs, probs = [np.array([t]) for t in range(T)], theta
+        else:                                         # 80% gene-level ECs, 20% transcript-unique
+            ecs = [np.arange(g * iso, (g + 1) * iso) for g in range(G)] + [np.array([t]) for t in range(T)]
+            probs = np.r_[0.8 * np.bincount(gene, theta), 0.2 * theta]
+        libs.append(_ec_library(f"p{p}", rng, ecs, probs / probs.sum(), n, T, names, np.ones(T)))
+    return libs, gene, psi
+
+
+def test_tied_fit_with_separate_ties_matches_untied():
+    from joli.joint import JointEM
+    libs, gene, _ = _two_platforms(np.random.default_rng(0))
+    a = JointEM(libs, units=[0, 1]).run(rel_tol=1e-8, max_iter=20000, zero_below=None)
+    b = JointEM(libs, units=[0, 1], tie=[0, 1], groups=gene).run(rel_tol=1e-8, max_iter=20000, zero_below=None)
+    np.testing.assert_allclose(a.theta, b.theta, atol=1e-6)
+    assert abs(a.loglik[-1] - b.loglik[-1]) < 1e-6 * abs(a.loglik[-1])
+
+
+def test_tied_fractions_pool_platforms_when_gene_expression_differs():
+    """Gene-level shifts between platforms: tied fractions pool both platforms (as good as a shared
+    theta, which is not biased within genes by gene-level shifts) and beat the resolving platform alone."""
+    from joli.joint import JointEM
+    libs, gene, psi = _two_platforms(np.random.default_rng(1), gene_shift=1.0)
+    def within_err(theta):
+        tot = np.bincount(gene, theta)
+        est = np.divide(theta, tot[gene], out=np.zeros_like(theta), where=tot[gene] > 0)
+        return 0.5 * np.abs(est - psi).sum() / len(np.unique(gene))
+    shared = JointEM(libs, units=[0, 0]).run(rel_tol=1e-6, max_iter=20000).theta[0]
+    tied = JointEM(libs, units=[0, 1], tie=[0, 0], groups=gene).run(rel_tol=1e-6, max_iter=20000).theta[0]
+    lr_only = JointEM(libs[:1]).run(rel_tol=1e-6, max_iter=20000).theta[0]
+    e_shared, e_tied, e_lr = within_err(shared), within_err(tied), within_err(lr_only)
+    assert e_tied <= e_shared + 1e-3 and e_tied < 0.6 * e_lr, (e_shared, e_tied, e_lr)
