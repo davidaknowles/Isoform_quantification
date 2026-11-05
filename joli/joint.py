@@ -530,17 +530,17 @@ class JointEM:
         return new
 
     def _lognormal_profile(self, y, act, tie, M):
-        """Shared profile h_j = mean_{u in j}(y_u - s_u) and unit offsets s_u = mean_t (y_ut - h_jt) over
-        active entries (a few alternating rounds; mean of s within each tie group fixed at 0)."""
+        """
+        Profile maximising the log prior given y: units of a tie group share their active set, so
+        with the offsets s centred within each group, h_j = mean_{u in j} y_u and
+        s_u = mean_{active t} (y_ut - h_jt) (exact, one pass).
+        """
         a = act.astype(np.float64)
-        s = np.zeros(self.K)
-        for _ in range(3):
-            h = np.divide(M @ (np.where(act, y, 0.0) - s[:, None] * a), M @ a,
-                          out=np.zeros((M.shape[0], y.shape[1])), where=(M @ a) > 0)
-            r = np.where(act, y - h[tie], 0.0)
-            s = r.sum(axis=1) / np.maximum(a.sum(axis=1), 1.0)
-            sm = (M @ s) / np.maximum(M.sum(axis=1), 1.0)
-            s -= sm[tie]
+        ya = np.where(act, y, 0.0)
+        cnt = M @ a
+        h = np.divide(M @ ya, cnt, out=np.zeros((M.shape[0], y.shape[1])), where=cnt > 0)
+        r = np.where(act, y - h[tie], 0.0)
+        s = r.sum(axis=1) / np.maximum(a.sum(axis=1), 1.0)
         return h, s
 
     def _lognormal_logprior(self, y, st, act, tie):
@@ -549,27 +549,38 @@ class JointEM:
 
     def _pooled_transcript_mstep(self, theta, Z, D):
         """
-        MAP-MM step for log theta_ut ~ N(eta_jt + c_u, tau^2) (j = tie(u)): Newton steps on
-        x = log theta for Q = sum Z x - D e^x + log prior, then the profile (eta, c). Units of a tie
-        group share their active set, so transcripts without reads in a unit get abundance from
-        the other units of its group through eta.
+        MAP-MM step for log theta_ut ~ N(eta_jt + c_u, tau^2) (j = tie(u)): the profile (eta, c) is
+        maximised at the input (so the objective depends on theta alone), then x = log theta is set
+        to the exact maximiser of Q = sum Z x - D e^x + log prior (_newton_lognormal), all on the
+        flat vector of active (unit, transcript) entries. Units of a tie group share their active
+        set, so transcripts without reads in a unit get abundance from the other units of its group
+        through eta.
         """
         tie = self._tie[0]
-        if getattr(self, "_tie_mats", None) is None or self._tie_mats[1].shape[1] != self.K:
-            M = np.zeros((int(tie.max()) + 1, self.K))
-            M[tie, np.arange(self.K)] = 1.0
-            self._tie_mats = (None, M)
-        M = self._tie_mats[1]
-        act = self.active
-        x = np.log(np.maximum(theta, 1e-300))
-        # profile (eta, c) maximised at the input, so the objective depends on theta alone
-        st = self._lognormal_profile(x, act, tie, M)
-        lp = self._lognormal_logprior(x, st, act, tie)
-        x = _newton_lognormal(x, Z, D, st[0][tie] + st[1][:, None], self._pooling["tau2"], act)
-        st = self._lognormal_profile(x, act, tie, M)
-        self._pooling["state"] = st
-        x = np.where(act, x, -np.inf)
-        new = np.exp(x - x.max(axis=1, keepdims=True))
+        if getattr(self, "_act_flat", None) is None:
+            u, t = np.nonzero(self.active)
+            key = tie[u] * self.T + t                               # (tie group, transcript)
+            gkey, ginv = np.unique(key, return_inverse=True)
+            self._act_flat = (u, u * self.T + t, ginv, len(gkey), np.bincount(ginv), np.bincount(u, minlength=self.K))
+        u, flat, ginv, n_gk, gcount, ucount = self._act_flat
+        x = np.log(np.maximum(np.take(theta, flat), 1e-300))
+
+        def profile(x):
+            h = np.bincount(ginv, weights=x, minlength=n_gk) / gcount     # eta_jt (mean over units of j)
+            c = np.bincount(u, weights=x - h[ginv], minlength=self.K) / np.maximum(ucount, 1)
+            return h, c
+
+        h, c = profile(x)
+        r = x - h[ginv] - c[u]
+        lp = float(-0.5 * (r @ r) / self._pooling["tau2"])
+        x = _newton_lognormal(x, np.take(Z, flat), np.take(D, flat), h[ginv] + c[u], self._pooling["tau2"], True)
+        self._pooling["state"] = profile(x)
+        new = np.zeros_like(theta)
+        starts = np.searchsorted(u, np.arange(self.K))             # entries are ordered by unit
+        mx = np.full(self.K, -np.inf)
+        has = ucount > 0
+        mx[has] = np.maximum.reduceat(x, starts[has])
+        np.put(new, flat, np.exp(x - mx[u]))
         new /= new.sum(axis=1, keepdims=True)
         return new, lp
 
@@ -682,28 +693,26 @@ def molar_to_tpm(theta: np.ndarray) -> np.ndarray:
     return 1e6 * theta / theta.sum(axis=-1, keepdims=True)
 
 
-def _newton_lognormal(x, Z, Dw, m, tau2, act, n_newton=4):
+def _newton_lognormal(x, Z, Dw, m, tau2, act, n_iter=4):
     """
-    Elementwise maximisation of f(x) = Z x - Dw e^x - (x - m)^2 / (2 tau2) (concave) by Newton
-    steps with step halving, from x; entries outside act are left unchanged.
+    Elementwise maximiser of f(x) = Z x - Dw e^x - (x - m)^2 / (2 tau2) (concave), in closed form:
+    the stationary point is x = c - W(tau2 Dw e^c) with c = m + tau2 Z and W the Lambert W function.
+    w = W(e^y), y = log(tau2 Dw) + c, solves w + log w = y; Newton on that monotone, concave
+    equation from w0 = log(1 + e^y) reaches 1e-15 relative error in 4 steps. Entries outside act keep x.
     """
-    f = lambda v: Z * v - Dw * np.exp(np.minimum(v, 700.0)) - (v - m) ** 2 / (2.0 * tau2)
-    x = np.where(act, np.maximum(x, m - 50.0), x)
-    fx = f(x)
-    for _ in range(n_newton):
-        ex = np.exp(np.minimum(x, 700.0))
-        g = Z - Dw * ex - (x - m) / tau2
-        h = -Dw * ex - 1.0 / tau2
-        step = -g / h
-        t = np.ones_like(x)
-        for _ in range(8):
-            xn = x + t * step
-            fn = f(xn)
-            bad = act & (fn < fx)
-            if not bad.any():
-                break
-            t = np.where(bad, 0.5 * t, t)
-        ok = act & (fn >= fx)
-        x = np.where(ok, xn, x)
-        fx = np.where(ok, fn, fx)
-    return x
+    from . import native
+    if native.available():
+        xr = native.lognormal_solve(np.ravel(Z), np.ravel(Dw), np.ravel(np.broadcast_to(m, np.shape(Z))),
+                                    tau2).reshape(np.shape(Z))
+        return xr if (np.ndim(act) == 0 and act) else np.where(act, xr, x)
+    c = m + tau2 * Z
+    with np.errstate(divide="ignore"):
+        y = np.log(tau2 * Dw) + c                          # -inf where Dw = 0
+    small = y < -30.0                                       # W(z) = z - z^2 + ...: w ~ e^y
+    yy = np.where(small, 0.0, y)
+    w = np.where(yy > 30.0, yy, np.log1p(np.exp(np.minimum(yy, 30.0))))
+    for _ in range(n_iter):
+        w -= (w + np.log(w) - yy) / (1.0 + 1.0 / w)
+        np.maximum(w, 1e-300, out=w)
+    w = np.where(small, np.exp(np.clip(y, -745.0, 0.0)), w)
+    return np.where(act, c - w, x)

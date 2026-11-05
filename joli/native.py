@@ -38,6 +38,8 @@ def _load():
     lib.joli_scatter_counts.argtypes = [size, ptr, ptr, ptr, ptr, ptr, size, ptr, size, ptr]
     lib.joli_gather_weights.restype = None
     lib.joli_gather_weights.argtypes = [size, ptr, ptr, size, ptr, ptr, size]
+    lib.joli_lognormal_solve.restype = None
+    lib.joli_lognormal_solve.argtypes = [size, ptr, ptr, ptr, ctypes.c_double, ptr, size]
     _LIB = lib
     return lib
 
@@ -123,3 +125,12 @@ def gather_weights(base, idx, w, threads=1, out=None):
     out = np.empty(len(base), dtype=np.float64) if out is None else out
     lib.joli_gather_weights(len(base), _p(base), _p(idx), len(w), _p(w), _p(out), threads)
     return out
+
+
+def lognormal_solve(Z, D, m, tau2, threads=None):
+    """x (n,) maximising Z x - D e^x - (x - m)^2 / (2 tau2) elementwise (see joint._newton_lognormal)."""
+    lib = _load()
+    Z, D, m = (np.ascontiguousarray(a, dtype=np.float64) for a in (Z, D, m))
+    x = np.empty(len(Z), dtype=np.float64)
+    lib.joli_lognormal_solve(len(Z), _p(Z), _p(D), _p(m), float(tau2), _p(x), threads or default_threads())
+    return x

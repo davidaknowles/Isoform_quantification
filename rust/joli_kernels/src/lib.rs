@@ -335,3 +335,57 @@ pub unsafe extern "C" fn joli_gather_weights(
         }
     });
 }
+
+/// Elementwise maximiser of f(x) = Z x - D e^x - (x - m)^2 / (2 tau2): x = c - W(tau2 D e^c),
+/// c = m + tau2 Z, with w = W(e^y) (y = log(tau2 D) + c) from Newton on w + log w = y starting at
+/// log(1 + e^y); w = e^y for y < -30, and x = c where D = 0. Written to x_out (length n).
+#[no_mangle]
+pub unsafe extern "C" fn joli_lognormal_solve(
+    n: usize,
+    z: *const f64,
+    d: *const f64,
+    m: *const f64,
+    tau2: f64,
+    x_out: *mut f64,
+    n_threads: usize,
+) {
+    let z = slice::from_raw_parts(z, n);
+    let d = slice::from_raw_parts(d, n);
+    let m = slice::from_raw_parts(m, n);
+    let x = slice::from_raw_parts_mut(x_out, n);
+    let solve = |i0: usize, xs: &mut [f64]| {
+        for (k, xo) in xs.iter_mut().enumerate() {
+            let i = i0 + k;
+            let c = m[i] + tau2 * z[i];
+            if d[i] <= 0.0 {
+                *xo = c;
+                continue;
+            }
+            let y = (tau2 * d[i]).ln() + c;
+            let w = if y < -30.0 {
+                y.exp()
+            } else {
+                let mut w = if y > 30.0 { y } else { y.exp().ln_1p() };
+                for _ in 0..4 {
+                    w -= (w + w.ln() - y) / (1.0 + 1.0 / w);
+                    if w < 1e-300 {
+                        w = 1e-300;
+                    }
+                }
+                w
+            };
+            *xo = c - w;
+        }
+    };
+    let n_threads = n_threads.max(1).min((n / MIN_POS_PER_THREAD).max(1));
+    if n_threads <= 1 {
+        solve(0, x);
+        return;
+    }
+    let chunk = (n + n_threads - 1) / n_threads;
+    std::thread::scope(|s| {
+        for (k, xs) in x.chunks_mut(chunk).enumerate() {
+            s.spawn(move || solve(k * chunk, xs));
+        }
+    });
+}
