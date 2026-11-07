@@ -24,10 +24,11 @@ Done
 - Primer-specific read-position models; poly(dT) internal-priming scale on unspliced targets.
 - Joint fit on all ~1B molecules (671M EC positions), all stages converge; unspliced share 6–27% per cell type.
 - Findings: Parse coverage is broad for both primers; 10x Kinnex reads often end upstream of GENCODE 3' ends.
+- Default joint fit = transcript-level platform pooling (τ = 1), refitted on all data (3 h 15 min, 16 cores); outputs SR, LR and consensus abundances per cell type.
 - Held-out LR evaluation (fixed 10% of LR molecules; training on 1–90%): a hard-shared abundance per cell type loses to LR alone, platform-specific gene totals break even, and partial pooling across platforms wins. Transcript-level pooling (τ = 1) is best at every depth, overall and within genes (+0.143 / +0.077 nats per held-out molecule at 1% LR training), positive for 19 of 21 cell types.
 
 Open
-- Make transcript-level pooling the default joint model; refit on all data; learn τ (currently chosen by held-out likelihood).
+- Learn τ (currently fixed at 1, chosen by held-out likelihood); possibly separate τ for spliced and unspliced targets (pre-mRNA share differs most between platforms).
 - Other held-out designs: whole LR libraries or donors, agreement with the Parse Kinnex same-chemistry library.
 - Sharing across cell types: tree or design-matrix prior (platform pooling exists; cell types are still not shared).
 - Posterior uncertainty, or identifiable isoform groups, for isoform-level scoring.
@@ -53,7 +54,6 @@ Open
 
 ## Next, in order
 
-1. Transcript-level platform pooling as the default joint fit on all data.
-2. Cross-cell-type prior (design matrix or tree), extending the pooling machinery; variational inference for uncertainty.
-3. Baselines on the bulk sets.
-4. Atlas: ENCODE4 bulk LR + Tabula Sapiens SS2 with composition estimation.
+1. Cross-cell-type prior (design matrix or tree), extending the pooling machinery; variational inference for uncertainty.
+2. Baselines on the bulk sets.
+3. Atlas: ENCODE4 bulk LR + Tabula Sapiens SS2 with composition estimation.
