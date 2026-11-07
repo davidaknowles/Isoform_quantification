@@ -23,8 +23,11 @@ Bias models are shared per platform x primer/kit across all of its libraries:
   SR, whose spliced rates are fixed)
   SR poly(dT) scale of internal priming on unspliced targets
 
-Fits: LR (long reads alone, with truncation; baseline), joint_plain, joint (all bias models).
-Outputs: tpm.tsv.gz (transcripts x fit|unit), fits.tsv, bias.tsv.
+Fits: LR (long reads alone, with the read-end model; baseline), joint_plain (no bias models; warm start),
+joint_shared (one abundance vector per cell type, all bias models) and joint (default: per cell type, SR
+and LR abundances shrunk towards a shared profile on the log scale, sd POOL_TAU, transcript level).
+Outputs: tpm.tsv.gz (transcripts x fit|unit; joint has <cell type>@SR, <cell type>@LR and the
+consensus profile <cell type>), fits.tsv, bias.tsv.
 
 Run: python analyses/parse/joint_celltype.py <sr_series_dirs,comma-separated> <lr_dirs,comma-separated> <ref_dir> <out_dir>
                                              [sr_fraction] [lr_fraction] [min_cells]
@@ -47,6 +50,8 @@ from joli.rad import libraries_from_molecules, load_rad_dump, molecule_alignment
 SR_READ_LEN = 150
 # final fits: high step cap, and stop once the log posterior gains < 1e-10 relative per iterate
 RUN_KW = dict(max_iter=20000, ll_rel_tol=1e-10)
+# log-scale sd of platform deviations in the default joint fit (best of 0.3, 1, 3 in the held-out LR evaluation)
+POOL_TAU = 1.0
 KAPPA0 = np.exp(-8.6)       # poly(dT) internal priming per base (Parse dT + hexamer joint fits)
 PRIMERS = ("poly(dT)", "random hexamer")
 
@@ -265,7 +270,7 @@ def fit_one(ctx, lib_dict, use_models, use_length, init=None, verbose=True, plat
     else:
         res = em.run(init_theta=init_theta, **RUN_KW)
     return dict(res=res, present=present, label=label, keys=keys, sr_models=sr_models, lr_models=lr_models,
-                lr_length=lr_length, sr_kappa=sr_kappa)
+                lr_length=lr_length, sr_kappa=sr_kappa, em=em)
 
 
 def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_cells=100):
@@ -275,19 +280,27 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
     sr_libs, lr_libs, _ = build_libraries(ctx, sr_fraction, lr_fraction)
     units = ctx["units"]
 
-    # LR alone (with truncation) is the baseline; SR alone cannot identify isoforms, so it is not fitted
-    fits = {"LR": (lr_libs, True, False),
-            "joint_plain": ({**sr_libs, **lr_libs}, False, False),
-            "joint": ({**sr_libs, **lr_libs}, True, True)}
+    # LR alone (with truncation) is the baseline; SR alone cannot identify isoforms, so it is not fitted.
+    # joint: SR and LR abundances per cell type shrunk towards a shared profile at transcript level
+    # (the best model in the held-out LR evaluation); joint_shared: one abundance vector per cell type.
+    both = {**sr_libs, **lr_libs}
+    fits = {"LR": (lr_libs, True, False, None, None),
+            "joint_plain": (both, False, False, None, None),
+            "joint_shared": (both, True, True, None, "joint_plain"),
+            "joint": (both, True, True, "transcript", "joint_shared")}
     tpm, summary, bias, done = {}, [], [], {}
-    for fit, (lib_dict, use_models, use_length) in fits.items():
+    for fit, (lib_dict, use_models, use_length, pool, init) in fits.items():
         t0 = time.time()
-        # the full joint fit starts from the joint fit without bias models (same libraries and units)
-        out = fit_one(ctx, lib_dict, use_models, use_length, init=done.get("joint_plain") if fit == "joint" else None)
+        out = fit_one(ctx, lib_dict, use_models, use_length, init=done.get(init), pool=pool, pool_tau=POOL_TAU)
         res, present = out["res"], out["present"]
         done[fit] = (present, res.theta)
         for i, u in enumerate(present):
             tpm[f"{fit}|{'@'.join(u) if isinstance(u, tuple) else u}"] = molar_to_tpm(res.theta[i])
+        if pool == "transcript":
+            # consensus per cell type: the shared profile of its SR and LR units
+            labels, prof = out["em"].pooled_profile()
+            for j, lab in enumerate(labels):
+                tpm[f"{fit}|{units[lab]}"] = molar_to_tpm(prof[j])
         if use_models:
             bias.append(bias_table(fit, out))
         sr_kappa = out["sr_kappa"]

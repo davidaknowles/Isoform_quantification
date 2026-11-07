@@ -329,3 +329,14 @@ def test_pooled_fit_with_stopping_rule_converges():
         assert _close_theta(fast.theta, ref.theta, 0.01), level
         lp = np.array(ref.loglik[:-1])
         assert (np.diff(lp) > -1e-6 * abs(lp[-1])).all(), level
+
+
+def test_pooled_profile_between_units():
+    """The consensus profile of a tie group lies between its units (small tau: equal to them)."""
+    from joli.joint import JointEM
+    libs, gene, _ = _two_platforms(np.random.default_rng(5), G=60, gene_shift=1.0)
+    em = JointEM(libs, units=[0, 1], tie=[7, 7], groups=gene, pool="transcript", pool_tau=0.003)
+    res = em.run(rel_tol=1e-7, max_iter=50000, zero_below=None)
+    labels, prof = em.pooled_profile()
+    assert labels == [7] and prof.shape == (1, em.T_full)
+    assert 0.5 * np.abs(prof[0] - res.theta[0]).sum() < 0.02

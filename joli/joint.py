@@ -238,7 +238,8 @@ class JointEM:
             tie = np.asarray(tie, dtype=np.int64)
             if len(tie) != self.K:
                 raise ValueError("tie needs one label per unit")
-            self._tie = (pd.factorize(tie)[0], gc.astype(np.int64), int(gc.max()) + 1, int(tie_iter))
+            codes, self._tie_labels = pd.factorize(tie)
+            self._tie = (codes, gc.astype(np.int64), int(gc.max()) + 1, int(tie_iter))
             # units sharing fractions are active on the union of their transcripts
             for j in np.unique(self._tie[0]):
                 us = self._tie[0] == j
@@ -437,6 +438,24 @@ class JointEM:
                 used[l] = fl.counts[ok].sum()
         return ll, used, n_zero
 
+    def pooled_profile(self):
+        """
+        Shared profile of each tie group from the last transcript-level pooled M-step,
+        exp(eta_jt) normalised over transcripts: the consensus molar fractions of the units in
+        group j (e.g. a cell type across platforms). Returns (tie labels, (n_tie, T_full) array).
+        """
+        if self._pooling is None or self._pooling["level"] != "transcript" or self._pooling["state"] is None:
+            raise ValueError("needs a fitted transcript-level pooled model")
+        h = self._pooling["state"][0]
+        j, t = np.divmod(self._act_gkey, self.T)
+        n_tie = len(self._tie_labels)
+        out = np.zeros((n_tie, self.T))
+        mx = np.full(n_tie, -np.inf)
+        np.maximum.at(mx, j, h)
+        out[j, t] = np.exp(h - mx[j])
+        out /= out.sum(axis=1, keepdims=True)
+        return list(self._tie_labels), self._expand(out)
+
     def set_bias(self, l, c=None, b=None):
         """Replace library l's flat compatibility weights c (aligned with its flat layout) and/or full-length rates b."""
         if c is not None:
@@ -561,6 +580,7 @@ class JointEM:
             u, t = np.nonzero(self.active)
             key = tie[u] * self.T + t                               # (tie group, transcript)
             gkey, ginv = np.unique(key, return_inverse=True)
+            self._act_gkey = gkey
             self._act_flat = (u, u * self.T + t, ginv, len(gkey), np.bincount(ginv), np.bincount(u, minlength=self.K))
         u, flat, ginv, n_gk, gcount, ucount = self._act_flat
         x = np.log(np.maximum(np.take(theta, flat), 1e-300))
