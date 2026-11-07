@@ -2,7 +2,7 @@
 
 Joint short-read (SR) + long-read (LR) isoform quantification across many samples: LR gives identifiability, SR gives coverage. Pure transcript-level quantification. Details and results are in [LABNOTEBOOK.md](LABNOTEBOOK.md).
 
-Status as of 2026-11-03.
+Status as of 2026-11-07.
 
 ## 1. Bulk method development (WTC11, SG-NEx, simulations)
 
@@ -24,10 +24,12 @@ Done
 - Primer-specific read-position models; poly(dT) internal-priming scale on unspliced targets.
 - Joint fit on all ~1B molecules (671M EC positions), all stages converge; unspliced share 6–27% per cell type.
 - Findings: Parse coverage is broad for both primers; 10x Kinnex reads often end upstream of GENCODE 3' ends.
+- Held-out LR evaluation (fixed 10% of LR molecules; training on 1–90%): a hard-shared abundance per cell type loses to LR alone, platform-specific gene totals break even, and partial pooling across platforms wins. Transcript-level pooling (τ = 1) is best at every depth, overall and within genes (+0.143 / +0.077 nats per held-out molecule at 1% LR training), positive for 19 of 21 cell types.
 
 Open
-- Evaluation design (not SR-only vs LR-only concordance): held-out LR likelihood on cells or donors, prediction of held-out LR from SR + remaining LR, agreement with the Parse Kinnex same-chemistry library.
-- Sharing across cell types: tree or design-matrix prior (units are currently fitted independently).
+- Make transcript-level pooling the default joint model; refit on all data; learn τ (currently chosen by held-out likelihood).
+- Other held-out designs: whole LR libraries or donors, agreement with the Parse Kinnex same-chemistry library.
+- Sharing across cell types: tree or design-matrix prior (platform pooling exists; cell types are still not shared).
 - Posterior uncertainty, or identifiable isoform groups, for isoform-level scoring.
 - Optional: 3' ends as poly(A)-site choice within an isoform.
 
@@ -51,7 +53,7 @@ Open
 
 ## Next, in order
 
-1. Held-out evaluation for part 2.
-2. Cross-cell-type prior (design matrix or tree) with variational inference, which also gives uncertainty.
+1. Transcript-level platform pooling as the default joint fit on all data.
+2. Cross-cell-type prior (design matrix or tree), extending the pooling machinery; variational inference for uncertainty.
 3. Baselines on the bulk sets.
 4. Atlas: ENCODE4 bulk LR + Tabula Sapiens SS2 with composition estimation.
