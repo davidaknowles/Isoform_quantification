@@ -11,6 +11,8 @@ from every LR library. Fits use a training fraction of the remaining molecules:
   joint_gpool_t<tau>, joint_tpool_t<tau>  (only when requested in [fits]) partial pooling: platform
          gene totals (shared within-gene fractions) or transcript abundances shrunk towards a
          shared cell-type profile, log-scale sd tau (warm-started from joint)
+  joint_design_ct<sd>[_tau<tau>]  (only when requested) design prior across cell types: unit log
+         abundances = intercept + platform + lineage + cell type (sd <sd>) + unit noise (tau, default 1)
 Each held-out LR library (cell type x kit x source library) is scored at the fit's
 abundances for its cell type and the fit's bias models for its kit:
 ll = sum_e n_e log sum_t mu_t c_et - N log sum_t mu_t b_t, over ECs with read-end
@@ -107,12 +109,17 @@ def main(sr_dirs, kdir, ref_dir, out_dir, lr_train_fraction, test_fraction=0.1, 
         if m:
             configs.append((f, both, True, True, False, ({"g": "gene", "t": "transcript"}[m.group(1)],
                                                           float(m.group(2))), "joint"))
+        m = re.fullmatch(r"joint_design_ct([0-9.]+)(?:_tau([0-9.]+))?", f)
+        if m:
+            configs.append((f, both, True, True, False, ("design", float(m.group(2) or 1.0),
+                                                          {"cell_type": float(m.group(1))}), "joint"))
     for fit, lib_dict, use_models, use_length, pg, pool, init in configs:
         if only is not None and fit not in only and fit != "joint_plain" and fit != init_of(only):
             continue
         t0 = time.time()
         out = jc.fit_one(ctx, lib_dict, use_models, use_length, init=inits.get(init), platform_genes=pg,
-                         pool=None if pool is None else pool[0], pool_tau=1.0 if pool is None else pool[1])
+                         pool=None if pool is None else pool[0], pool_tau=1.0 if pool is None else pool[1],
+                         design_sd=pool[2] if pool is not None and len(pool) > 2 else None)
         res = out["res"]
         inits[fit] = (out["present"], res.theta)
         if fit == "joint_plain":

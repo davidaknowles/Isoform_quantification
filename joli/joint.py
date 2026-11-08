@@ -151,20 +151,30 @@ class JointEM:
                     updates of G and psi (tie_iter rounds; one round already raises the MM surrogate).
         groups    : (T_full,) int -- group (gene) per transcript for tie; negative values get a
                     group of their own.
-        pool      : None | "gene" | "transcript" -- partial pooling across units with the same tie
+        pool      : None | "gene" | "transcript" | "design" -- partial pooling across units with the same tie
                     label instead of exact sharing. "gene": theta_ut = G_ug psi_jt with shared psi and
                     log G_ug ~ N(log H_jg + s_u, pool_tau^2); "transcript": log theta_ut ~ N(eta_jt + c_u,
                     pool_tau^2). Small pool_tau approaches a shared theta, large pool_tau separate units
                     (gene: shared psi with free gene totals). MAP by MM with Newton steps on the logs; the
                     profile (shared means and unit offsets) is maximised out, so the objective is a
                     function of theta.
+                    "design": log theta_ut = c_u + sum_d X_ud B_dt + e_ut, e ~ N(0, pool_tau^2), with
+                    B_dt ~ N(0, design_sd_d^2) (inf: flat) and free unit offsets c_u; all units are
+                    active on every transcript seen in some library (transcripts without reads in a
+                    unit are shrunk by its expected-read term), so the profile (c, B) is a closed-form
+                    ridge solve shared by all transcripts. One-hot cell-type columns with flat priors
+                    give transcript-level pooling; lineage, global and platform columns with finite sd
+                    share information across cell types.
+        design    : (K, D) design matrix of the units (pool="design").
+        design_sd : (D,) prior sd of each column's effects (np.inf for unpenalised columns).
         backend   : "auto" | "numpy" | "rust" -- E-step implementation; "auto" uses the
                     compiled kernels (joli.native, rust/joli_kernels) when built.
         threads   : int | None -- threads for the compiled kernels.
     """
 
     def __init__(self, libraries, pi=None, units=None, unit_names=None, backend="auto", threads=None,
-                 sort_ecs=True, tie=None, groups=None, tie_iter=1, pool=None, pool_tau=1.0):
+                 sort_ecs=True, tie=None, groups=None, tie_iter=1, pool=None, pool_tau=1.0, design=None,
+                 design_sd=None):
         from . import native
         if backend == "auto":
             backend = "rust" if native.available() else "numpy"
@@ -224,7 +234,20 @@ class JointEM:
         self._N = np.array([fl.N for fl in self.libs])
         self._tie = None
         self._pooling = None
-        if pool is not None:
+        if pool == "design":
+            X = np.asarray(design, dtype=np.float64)
+            sd = np.asarray(design_sd, dtype=np.float64)
+            if X.shape[0] != self.K or sd.shape != (X.shape[1],):
+                raise ValueError("design needs one row per unit and design_sd one value per column")
+            tau2 = float(pool_tau) ** 2
+            lam = np.where(np.isfinite(sd), 1.0 / np.maximum(sd, 1e-300) ** 2, 0.0)
+            # ridge solve on unit-centred log abundances; pinv for collinear unpenalised columns
+            proj = np.linalg.pinv(X.T @ X / tau2 + np.diag(lam)) @ X.T / tau2          # (D, K)
+            self._pooling = {"level": "design", "tau2": tau2, "state": None, "X": X, "lam": lam,
+                             "proj": proj}
+            self.active[:] = self.active.any(axis=0)
+            self._activef = self.active.astype(np.float64)
+        elif pool is not None:
             if tie is None or (pool == "gene" and groups is None):
                 raise ValueError("pool needs tie (and groups for gene-level pooling)")
             self._pooling = {"level": pool, "tau2": float(pool_tau) ** 2, "state": None}
@@ -438,6 +461,47 @@ class JointEM:
                 used[l] = fl.counts[ok].sum()
         return ll, used, n_zero
 
+    def _design_profile(self, x):
+        """(c, B, m): unit offsets c_u = mean_t x_ut, ridge effects B (D, T) of the centred x, prior mean m."""
+        P = self._pooling
+        c = x.mean(axis=1)
+        B = P["proj"] @ (x - c[:, None])
+        return c, B, c[:, None] + P["X"] @ B
+
+    def _design_logprior(self, x, c, B, m):
+        P = self._pooling
+        r = x - m
+        return float(-0.5 * (r * r).sum() / P["tau2"] - 0.5 * (P["lam"] @ (B * B).sum(axis=1)))
+
+    def _pooled_design_mstep(self, theta, Z, D):
+        """
+        MAP-MM step for the design prior: profile (c, B) maximised at the input (closed form), then each
+        x_ut = log theta_ut set to the exact maximiser of Z x - D e^x - (x - m)^2 / (2 tau^2).
+        """
+        P = self._pooling
+        x = np.log(np.maximum(theta, 1e-300))
+        c, B, m = self._design_profile(x)
+        lp = self._design_logprior(x, c, B, m)
+        x = _newton_lognormal(x, Z, D, m, P["tau2"], True)
+        P["state"] = self._design_profile(x)[:2]
+        new = np.exp(x - x.max(axis=1, keepdims=True))
+        new /= new.sum(axis=1, keepdims=True)
+        return new, lp
+
+    def design_profile(self, rows):
+        """
+        Molar fractions exp(r . B) normalised over transcripts for design rows r (n, D) (e.g. a cell
+        type's intercept + lineage + cell-type columns without platform), from the last M-step.
+        Returns (n, T_full).
+        """
+        if self._pooling is None or self._pooling["level"] != "design" or self._pooling["state"] is None:
+            raise ValueError("needs a fitted design-pooled model")
+        B = self._pooling["state"][1]
+        e = np.atleast_2d(np.asarray(rows, dtype=np.float64)) @ B
+        out = np.exp(e - e.max(axis=1, keepdims=True))
+        out /= out.sum(axis=1, keepdims=True)
+        return self._expand(out)
+
     def pooled_profile(self):
         """
         Shared profile of each tie group from the last transcript-level pooled M-step,
@@ -469,6 +533,11 @@ class JointEM:
     def _update(self, theta, a):
         """One MM step on compact theta. Returns (new theta, log posterior at the input theta)."""
         Z, D, ll, _ = self._estep(theta)
+        if self._pooling is not None and self._pooling["level"] == "design":
+            if a is not None:
+                raise NotImplementedError("design pooling with a Dirichlet prior")
+            new, lp = self._pooled_design_mstep(theta, Z, D)
+            return new, ll + lp
         if self._tie is not None:
             if a is not None:
                 raise NotImplementedError("tied fractions with a Dirichlet prior")
@@ -680,6 +749,8 @@ class JointEM:
             if n_steps >= min_iter and (changed == 0 or ll_stall):
                 converged = True
                 break
+        if zero_below is not None and self._pooling is not None and self._pooling["level"] == "design":
+            zero_below = None              # the design prior gives unseen transcripts shrunk abundances
         if zero_below is not None:
             Z, _, _, _ = self._estep(theta)
             if self._tie is not None:              # zero by the tie group's expected reads

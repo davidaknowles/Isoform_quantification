@@ -52,6 +52,14 @@ SR_READ_LEN = 150
 RUN_KW = dict(max_iter=20000, ll_rel_tol=1e-10)
 # log-scale sd of platform deviations in the default joint fit (best of 0.3, 1, 3 in the held-out LR evaluation)
 POOL_TAU = 1.0
+# lineage of the CellTypist Immune_All_Low PBMC types, for the cross-cell-type design prior
+LINEAGE = {"B": ["Naive_B_cells", "Memory_B_cells", "Age-associated_B_cells", "Plasma_cells", "Plasmablasts",
+                 "Germinal_center_B_cells", "Proliferative_germinal_center_B_cells"],
+           "myeloid": ["Classical_monocytes", "Non-classical_monocytes", "Intermediate_macrophages", "DC1", "DC2",
+                       "pDC", "Migratory_DCs", "Mast_cells", "Neutrophils"]}
+LINEAGE_OF = {ct: lin for lin, cts in LINEAGE.items() for ct in cts}     # everything else: T/NK
+# prior sd of design effects: platform (flat), lineage, cell type (overridden per fit)
+DESIGN_SD = {"platform": np.inf, "lineage": 2.0, "cell_type": 1.0}
 KAPPA0 = np.exp(-8.6)       # poly(dT) internal priming per base (Parse dT + hexamer joint fits)
 PRIMERS = ("poly(dT)", "random hexamer")
 
@@ -216,7 +224,7 @@ def build_libraries(ctx, sr_fraction, lr_fraction, lr_test_fraction=0.0):
 
 
 def fit_one(ctx, lib_dict, use_models, use_length, init=None, verbose=True, platform_genes=False, pool=None,
-            pool_tau=1.0):
+            pool_tau=1.0, design_sd=None):
     """
     Fit one configuration. Bias models are shared per platform x primer/kit: SR position profiles
     (poly(dT): distance to the 3' end; hexamer: relative position) and the SR poly(dT) unspliced
@@ -225,7 +233,9 @@ def fit_one(ctx, lib_dict, use_models, use_length, init=None, verbose=True, plat
     share within-gene fractions but have platform-specific gene totals (JointEM tie/groups;
     unspliced targets are groups of their own). pool ("gene" | "transcript") instead shrinks the
     platforms' gene totals (with shared within-gene fractions) or transcript abundances towards a
-    shared cell-type profile with log-scale sd pool_tau (JointEM pool).
+    shared cell-type profile with log-scale sd pool_tau (JointEM pool). pool="design" adds sharing across
+    cell types: log abundances of the (cell type, platform) units follow intercept + platform + lineage
+    + cell type effects (design_units; prior sds DESIGN_SD updated by design_sd) plus unit noise pool_tau.
     init: (unit labels, theta) of an earlier fit; per-cell-type abundances are copied to both
     platforms of a platform_genes fit.
     Returns dict with res, present (unit labels), label (library key -> unit label), keys and models.
@@ -256,9 +266,13 @@ def fit_one(ctx, lib_dict, use_models, use_length, init=None, verbose=True, plat
     local = {u: i for i, u in enumerate(present)}
     pi = np.zeros((len(libs), len(present)))
     pi[np.arange(len(libs)), [local[label(k)] for k in keys]] = 1.0
-    tie = [unit_idx[u[0]] for u in present] if platform_genes else None
+    tie = [unit_idx[u[0]] for u in present] if platform_genes and pool != "design" else None
+    X = sd = None
+    if pool == "design":
+        X, sd, _ = design_units(present, ctx["units"], {**DESIGN_SD, **(design_sd or {})})
     em = JointEM(libs, pi=pi, unit_names=["@".join(u) if platform_genes else u for u in present],
-                 tie=tie, groups=ctx["gene_groups"] if platform_genes else None, pool=pool, pool_tau=pool_tau)
+                 tie=tie, groups=ctx["gene_groups"] if tie is not None else None, pool=pool, pool_tau=pool_tau,
+                 design=X, design_sd=sd)
     init_theta = None
     if init is not None:
         imap = {u: i for i, u in enumerate(init[0])}
@@ -271,6 +285,24 @@ def fit_one(ctx, lib_dict, use_models, use_length, init=None, verbose=True, plat
         res = em.run(init_theta=init_theta, **RUN_KW)
     return dict(res=res, present=present, label=label, keys=keys, sr_models=sr_models, lr_models=lr_models,
                 lr_length=lr_length, sr_kappa=sr_kappa, em=em)
+
+
+def design_units(present, units, sds, platform=None):
+    """
+    Design matrix of (cell type, platform) units: intercept, LR indicator, lineage indicators, cell-type
+    indicators, with prior sds (intercept flat). platform (float) overrides the LR column, e.g. 0.5 for
+    a platform-averaged consensus row. Returns (X (n, D), sd (D,), column names).
+    """
+    lins = sorted({LINEAGE_OF.get(ct, "T/NK") for ct in units})
+    cols = ["intercept", "LR"] + [f"lineage:{l}" for l in lins] + [f"cell_type:{c}" for c in units]
+    sd = np.r_[np.inf, sds["platform"], np.full(len(lins), sds["lineage"]), np.full(len(units), sds["cell_type"])]
+    X = np.zeros((len(present), len(cols)))
+    for i, (ct, plat) in enumerate(present):
+        X[i, 0] = 1.0
+        X[i, 1] = (plat == "LR") if platform is None else platform
+        X[i, 2 + lins.index(LINEAGE_OF.get(ct, "T/NK"))] = 1.0
+        X[i, 2 + len(lins) + units.index(ct)] = 1.0
+    return X, sd, cols
 
 
 def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_cells=100):

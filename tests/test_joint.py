@@ -340,3 +340,43 @@ def test_pooled_profile_between_units():
     labels, prof = em.pooled_profile()
     assert labels == [7] and prof.shape == (1, em.T_full)
     assert 0.5 * np.abs(prof[0] - res.theta[0]).sum() < 0.02
+
+
+def _cell_types(rng, K=4, G=80, iso=3, dev=0.3, depths=None):
+    """K cell types whose log abundances deviate (sd dev) from a common profile; one transcript-resolving
+    library each (depths[k] reads). Returns libraries, true theta (K, T), gene index."""
+    T = G * iso
+    names = [f"t{i}" for i in range(T)]
+    gene = np.repeat(np.arange(G), iso)
+    base = rng.normal(0, 1.5, T)
+    libs, thetas = [], []
+    for k in range(K):
+        x = base + rng.normal(0, dev, T)
+        th = np.exp(x) / np.exp(x).sum()
+        thetas.append(th)
+        libs.append(_ec_library(f"k{k}", rng, [np.array([t]) for t in range(T)], th, depths[k], T, names, np.ones(T)))
+    return libs, np.array(thetas), gene
+
+
+def test_design_one_hot_flat_matches_separate_units():
+    """Flat one-hot design = no sharing: equals separate unit fits when every unit sees every transcript."""
+    from joli.joint import JointEM
+    libs, _, gene = _cell_types(np.random.default_rng(0), depths=[200000] * 4)
+    kw = dict(rel_tol=1e-8, max_iter=50000)
+    sep = JointEM(libs, units=[0, 1, 2, 3]).run(**kw).theta
+    X = np.eye(4)
+    des = JointEM(libs, units=[0, 1, 2, 3], pool="design", design=X, design_sd=np.full(4, np.inf), pool_tau=1.0).run(**kw).theta
+    assert np.all(sep > 0)
+    assert _close_theta(sep, des, 0.01)
+
+
+def test_design_prior_helps_sparse_cell_type():
+    from joli.joint import JointEM
+    libs, truth, gene = _cell_types(np.random.default_rng(1), dev=0.3, depths=[100000, 100000, 100000, 600])
+    kw = dict(rel_tol=1e-7, max_iter=50000)
+    sep = JointEM(libs, units=[0, 1, 2, 3]).run(**kw).theta
+    X = np.column_stack([np.ones(4), np.eye(4)])                    # intercept + cell types
+    des = JointEM(libs, units=[0, 1, 2, 3], pool="design", design=X,
+                  design_sd=np.r_[np.inf, np.full(4, 0.3)], pool_tau=0.1).run(**kw).theta
+    err = lambda th: 0.5 * np.abs(th[3] - truth[3]).sum()
+    assert err(des) < 0.7 * err(sep), (err(sep), err(des))
