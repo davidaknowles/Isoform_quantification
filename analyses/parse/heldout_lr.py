@@ -81,8 +81,8 @@ def score(ctx, fit, out, test_libs, genes):
 
 
 def init_of(only):
-    """joint_gene and the pooled fits are warm-started from joint, so running them also needs joint."""
-    return "joint" if only is not None and any(f == "joint_gene" or "pool" in f for f in only) else None
+    """joint_gene, the pooled fits and the design fits are warm-started from joint, so running them also needs joint."""
+    return "joint" if only is not None and any(f == "joint_gene" or "pool" in f or "design" in f for f in only) else None
 
 
 def main(sr_dirs, kdir, ref_dir, out_dir, lr_train_fraction, test_fraction=0.1, sr_fraction=1.0, min_cells=100,
