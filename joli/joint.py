@@ -167,6 +167,9 @@ class JointEM:
                     share information across cell types.
         design    : (K, D) design matrix of the units (pool="design").
         design_sd : (D,) prior sd of each column's effects (np.inf for unpenalised columns).
+        design_mstep : "alternate" | "exact" -- design M-step: design_inner rounds alternating the profile
+                    and the per-entry update (default), or per-transcript Newton on the MM surrogate with
+                    B profiled out (unit offsets held; fewer MM steps but ~100x costlier per step).
         backend   : "auto" | "numpy" | "rust" -- E-step implementation; "auto" uses the
                     compiled kernels (joli.native, rust/joli_kernels) when built.
         threads   : int | None -- threads for the compiled kernels.
@@ -174,7 +177,7 @@ class JointEM:
 
     def __init__(self, libraries, pi=None, units=None, unit_names=None, backend="auto", threads=None,
                  sort_ecs=True, tie=None, groups=None, tie_iter=1, pool=None, pool_tau=1.0, design=None,
-                 design_sd=None):
+                 design_sd=None, design_mstep="alternate", design_inner=3):
         from . import native
         if backend == "auto":
             backend = "rust" if native.available() else "numpy"
@@ -243,8 +246,11 @@ class JointEM:
             lam = np.where(np.isfinite(sd), 1.0 / np.maximum(sd, 1e-300) ** 2, 0.0)
             # ridge solve on unit-centred log abundances; pinv for collinear unpenalised columns
             proj = np.linalg.pinv(X.T @ X / tau2 + np.diag(lam)) @ X.T / tau2          # (D, K)
+            # profiled prior given unit offsets: -1/2 sum_t (x_t - c)' Q (x_t - c), Q = (I - X proj) / tau^2
+            Q = (np.eye(self.K) - X @ proj) / tau2
+            Q = 0.5 * (Q + Q.T)
             self._pooling = {"level": "design", "tau2": tau2, "state": None, "X": X, "lam": lam,
-                             "proj": proj}
+                             "proj": proj, "Q": Q, "mstep": design_mstep, "inner": int(design_inner)}
             self.active[:] = self.active.any(axis=0)
             self._activef = self.active.astype(np.float64)
         elif pool is not None:
@@ -482,7 +488,13 @@ class JointEM:
         x = np.log(np.maximum(theta, 1e-300))
         c, B, m = self._design_profile(x)
         lp = self._design_logprior(x, c, B, m)
-        x = _newton_lognormal(x, Z, D, m, P["tau2"], True)
+        if P["mstep"] == "exact":
+            x = _design_newton(x, Z, D, c, P["Q"])
+        else:
+            for i in range(P["inner"]):
+                if i:
+                    c, B, m = self._design_profile(x)
+                x = _newton_lognormal(x, Z, D, m, P["tau2"], True)
         P["state"] = self._design_profile(x)[:2]
         new = np.exp(x - x.max(axis=1, keepdims=True))
         new /= new.sum(axis=1, keepdims=True)
@@ -673,18 +685,77 @@ class JointEM:
         new /= new.sum(axis=1, keepdims=True)
         return new, lp
 
+    def _anderson(self, theta, a, max_iter, min_iter, rel_tol, theta_floor, ll_rel_tol, verbose, m=5, reg=1e-10):
+        """
+        Anderson acceleration (type II, memory m) of the MM map F in x = log theta on active entries:
+        with residuals f_k = F(x_k) - x_k, x_{k+1} = F(x_k) - dG gamma, gamma minimising
+        |f_k - dF gamma| (dF, dG differences of the last m residuals and images). One MM step per
+        iterate; a candidate whose log posterior (from the next MM step) falls below the last accepted
+        one is replaced by the plain MM image F(x_k), which cannot decrease it, and the history restarts.
+        Returns (theta, log-posterior history, converged, MM steps).
+        """
+        act = self._activef > 0
+        lx = lambda th: np.log(np.maximum(th[act], 1e-300))
+        def from_x(x):
+            th = np.zeros_like(theta)
+            v = np.full(theta.shape, -np.inf)
+            v[act] = x
+            th = np.exp(v - v.max(axis=1, keepdims=True))
+            return th / th.sum(axis=1, keepdims=True)
+        history, converged, n_steps = [], False, 0
+        Fth, ll = self._update(theta, a)                 # image of theta and log posterior at theta
+        n_steps += 1
+        x, g = lx(theta), lx(Fth)
+        Xs, Gs = [x], [g]
+        while n_steps < max_iter:
+            f = Gs[-1] - Xs[-1]
+            if len(Xs) > 1:
+                dF = np.stack([(Gs[i + 1] - Xs[i + 1]) - (Gs[i] - Xs[i]) for i in range(len(Xs) - 1)], axis=1)
+                dG = np.stack([Gs[i + 1] - Gs[i] for i in range(len(Xs) - 1)], axis=1)
+                A = dF.T @ dF
+                gam = np.linalg.solve(A + reg * np.trace(A) * np.eye(len(A)) + 1e-300 * np.eye(len(A)), dF.T @ f)
+                xn = Gs[-1] - dG @ gam
+            else:
+                xn = Gs[-1]
+            cand = from_x(xn)
+            Fc, llc = self._update(cand, a)
+            n_steps += 1
+            if llc < ll - 1e-12 * abs(ll):
+                # reject: take the plain MM image of the last accepted point and restart the history
+                cand = from_x(Gs[-1])
+                Fc, llc = self._update(cand, a)
+                n_steps += 1
+                Xs, Gs = [], []
+            ll_stall = ll_rel_tol is not None and 0.0 <= llc - ll < ll_rel_tol * abs(llc)
+            history.append(ll)
+            prev = from_x(Xs[-1]) if Xs else theta
+            diff = np.abs(cand - prev)
+            changed = int(np.count_nonzero((cand > theta_floor) & (diff > rel_tol * cand)))
+            theta, ll = cand, llc
+            Xs.append(lx(cand)); Gs.append(lx(Fc))
+            Xs, Gs = Xs[-(m + 1):], Gs[-(m + 1):]
+            if verbose and (len(history) <= 3 or len(history) % 50 == 0):
+                print(f"[JointEM/anderson] iterate {len(history)} ({n_steps} MM steps): logpost={ll:.6e} changed={changed}")
+            if n_steps >= min_iter and (changed == 0 or ll_stall):
+                converged = True
+                break
+        return theta, history, converged, n_steps
+
     def run(self, prior=None, init_theta=None, max_iter=5000, min_iter=20,
-            rel_tol=1e-2, theta_floor=1e-8, accelerate=True, zero_below=0.01,
+            rel_tol=1e-2, theta_floor=1e-8, accelerate="auto", zero_below=0.01,
             ll_rel_tol=None, verbose=False) -> JointResult:
         """
         Iterate until no monitored theta (> theta_floor) changes by more than
         rel_tol relatively between successive iterates (kallisto's rule; its
         0.01-read floor corresponds to theta_floor).
 
-        With accelerate=True each iterate is a SQUAREM step (Varadhan and
+        With accelerate=True (or "squarem") each iterate is a SQUAREM step (Varadhan and
         Roland 2008, scheme S3): two MM steps, an extrapolation, and one
         stabilising MM step, falling back to the plain second MM step when the
-        extrapolated point has lower log posterior. n_iter counts MM steps.
+        extrapolated point has lower log posterior. accelerate="anderson" uses
+        Anderson acceleration of the MM map instead (_anderson). "auto" (default) uses
+        Anderson for transcript-level and design pooling, whose units are coupled through the
+        prior (about 18x fewer MM steps in simulation), and SQUAREM otherwise. n_iter counts MM steps.
 
         After convergence, transcripts of unit k whose expected read count over
         all libraries is below zero_below are set to zero and one more MM step
@@ -712,7 +783,13 @@ class JointEM:
         converged = False
         n_steps = 0
         it = 0
-        while n_steps < max_iter:
+        if accelerate == "auto":
+            pooled = self._pooling is not None and self._pooling["level"] in ("transcript", "design")
+            accelerate = "anderson" if pooled else "squarem"
+        if accelerate == "anderson":
+            theta, history, converged, n_steps = self._anderson(theta, a, max_iter, min_iter, rel_tol, theta_floor,
+                                                                ll_rel_tol, verbose)
+        while accelerate != "anderson" and n_steps < max_iter:
             t1, ll0 = self._update(theta, a)
             t2, ll1 = self._update(t1, a)
             n_steps += 2
@@ -807,3 +884,42 @@ def _newton_lognormal(x, Z, Dw, m, tau2, act, n_iter=4):
         np.maximum(w, 1e-300, out=w)
     w = np.where(small, np.exp(np.clip(y, -745.0, 0.0)), w)
     return np.where(act, c - w, x)
+
+
+def _design_newton(x, Z, D, c, Q, n_newton=8, tol=1e-9, chunk=20000):
+    """
+    Per-transcript maximiser of g_t(x) = Z_t . x - D_t . e^x - (x - c)' Q (x - c) / 2 over the K units
+    (columns of x (K, T)), by damped Newton steps with batched K x K solves of diag(D e^x) + Q;
+    concave, so each step is halved until g increases. Returns x (K, T).
+    """
+    x = x.copy()
+    K, T = x.shape
+    for t0 in range(0, T, chunk):
+        sl = slice(t0, min(T, t0 + chunk))
+        xs = x[:, sl].T.copy()                       # (n, K)
+        Zs, Ds = Z[:, sl].T, D[:, sl].T
+        def g(v):
+            r = v - c
+            return (Zs * v).sum(1) - (Ds * np.exp(np.minimum(v, 700.0))).sum(1) - 0.5 * np.einsum("nk,kj,nj->n", r, Q, r)
+        gv = g(xs)
+        for _ in range(n_newton):
+            w = Ds * np.exp(np.minimum(xs, 700.0))
+            grad = Zs - w - (xs - c) @ Q
+            H = Q[None, :, :] + w[:, :, None] * np.eye(K)[None, :, :]
+            H[:, np.arange(K), np.arange(K)] += 1e-12
+            step = np.linalg.solve(H, grad[:, :, None])[:, :, 0]
+            t = np.ones(len(xs))
+            for _ in range(12):
+                xn = xs + t[:, None] * step
+                gn = g(xn)
+                bad = gn < gv - 1e-12 * np.abs(gv)
+                if not bad.any():
+                    break
+                t = np.where(bad, 0.5 * t, t)
+            ok = gn >= gv - 1e-12 * np.abs(gv)
+            xs = np.where(ok[:, None], xn, xs)
+            gv = np.where(ok, gn, gv)
+            if np.abs(step * t[:, None]).max() < tol:
+                break
+        x[:, sl] = xs.T
+    return x

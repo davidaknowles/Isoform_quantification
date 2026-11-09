@@ -80,9 +80,17 @@ def score(ctx, fit, out, test_libs, genes):
     return pd.DataFrame(rows.values())
 
 
-def init_of(only):
-    """joint_gene, the pooled fits and the design fits are warm-started from joint, so running them also needs joint."""
-    return "joint" if only is not None and any(f == "joint_gene" or "pool" in f or "design" in f for f in only) else None
+def needed(only):
+    """Fits to run for the requested ones, including their warm starts: joint_gene and the pooled fits
+    start from joint, the design fits from joint_tpool_t1 (closest model), joint from joint_plain."""
+    if only is None:
+        return None
+    need = set(only) | {"joint_plain"}
+    if any(f == "joint_gene" or "pool" in f or "design" in f for f in only):
+        need.add("joint")
+    if any("design" in f for f in only):
+        need.add("joint_tpool_t1")
+    return need
 
 
 def main(sr_dirs, kdir, ref_dir, out_dir, lr_train_fraction, test_fraction=0.1, sr_fraction=1.0, min_cells=100,
@@ -104,7 +112,7 @@ def main(sr_dirs, kdir, ref_dir, out_dir, lr_train_fraction, test_fraction=0.1, 
                ("joint_plain", both, False, False, False, None, None),
                ("joint", both, True, True, False, None, "joint_plain"),
                ("joint_gene", both, True, True, True, None, "joint")]
-    for f in sorted(only or []):
+    for f in sorted(needed(only) or [], key=lambda f: ("design" in f, f)):   # design fits after their warm start
         m = re.fullmatch(r"joint_(g|t)pool_t([0-9.]+)", f)
         if m:
             configs.append((f, both, True, True, False, ({"g": "gene", "t": "transcript"}[m.group(1)],
@@ -112,9 +120,9 @@ def main(sr_dirs, kdir, ref_dir, out_dir, lr_train_fraction, test_fraction=0.1, 
         m = re.fullmatch(r"joint_design_ct([0-9.]+)(?:_tau([0-9.]+))?", f)
         if m:
             configs.append((f, both, True, True, False, ("design", float(m.group(2) or 1.0),
-                                                          {"cell_type": float(m.group(1))}), "joint"))
+                                                          {"cell_type": float(m.group(1))}), "joint_tpool_t1"))
     for fit, lib_dict, use_models, use_length, pg, pool, init in configs:
-        if only is not None and fit not in only and fit != "joint_plain" and fit != init_of(only):
+        if only is not None and fit not in needed(only):
             continue
         t0 = time.time()
         out = jc.fit_one(ctx, lib_dict, use_models, use_length, init=inits.get(init), platform_genes=pg,

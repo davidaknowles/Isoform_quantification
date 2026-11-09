@@ -380,3 +380,26 @@ def test_design_prior_helps_sparse_cell_type():
                   design_sd=np.r_[np.inf, np.full(4, 0.3)], pool_tau=0.1).run(**kw).theta
     err = lambda th: 0.5 * np.abs(th[3] - truth[3]).sum()
     assert err(des) < 0.7 * err(sep), (err(sep), err(des))
+
+
+def test_anderson_matches_squarem_on_pooled_fits():
+    """Anderson acceleration reaches the SQUAREM optimum with far fewer MM steps on coupled pooled fits,
+    and its log posterior never decreases between accepted iterates."""
+    import sys, os
+    sys.path.insert(0, os.path.dirname(__file__))
+    from sim_design import design_problem
+    from joli.joint import JointEM
+    libs, X, _, gene = design_problem(np.random.default_rng(0), K=4, G=150)
+    K = X.shape[0]
+    sd = np.r_[np.inf, np.inf, np.full(X.shape[1] - 2, 0.5)]
+    for mk in [lambda: JointEM(libs, units=list(range(K)), pool="design", design=X, design_sd=sd, pool_tau=0.5),
+               lambda: JointEM(libs, units=list(range(K)), tie=[k // 2 for k in range(K)], groups=gene,
+                               pool="transcript", pool_tau=0.5)]:
+        kw = dict(rel_tol=1e-6, ll_rel_tol=1e-12, max_iter=20000, zero_below=None)
+        sq = mk().run(accelerate="squarem", **kw)
+        an = mk().run(accelerate="anderson", **kw)
+        assert an.n_iter < sq.n_iter / 3, (an.n_iter, sq.n_iter)
+        assert an.loglik[-1] > sq.loglik[-1] - 1e-7 * abs(sq.loglik[-1])
+        assert _close_theta(an.theta, sq.theta, 0.01)
+        lp = np.array(an.loglik[:-1])
+        assert (np.diff(lp) > -1e-9 * abs(lp[-1])).all()
