@@ -24,10 +24,12 @@ Bias models are shared per platform x primer/kit across all of its libraries:
   SR poly(dT) scale of internal priming on unspliced targets
 
 Fits: LR (long reads alone, with the read-end model; baseline), joint_plain (no bias models; warm start),
-joint_shared (one abundance vector per cell type, all bias models) and joint (default: per cell type, SR
-and LR abundances shrunk towards a shared profile on the log scale, sd POOL_TAU, transcript level).
-Outputs: tpm.tsv.gz (transcripts x fit|unit; joint has <cell type>@SR, <cell type>@LR and the
-consensus profile <cell type>), fits.tsv, bias.tsv.
+joint_shared (one abundance vector per cell type, all bias models), joint_tpool (per cell type, SR and
+LR abundances shrunk towards a shared profile on the log scale, sd POOL_TAU) and joint (default: design
+prior across cell types and platforms, log abundances = intercept + platform + lineage + cell type
+(sd DESIGN_CT_SD) effects + unit noise (sd POOL_TAU)).
+Outputs: tpm.tsv.gz (transcripts x fit|unit; joint and joint_tpool have <cell type>@SR, <cell type>@LR
+and a consensus <cell type>), fits.tsv, bias.tsv.
 
 Run: python analyses/parse/joint_celltype.py <sr_series_dirs,comma-separated> <lr_dirs,comma-separated> <ref_dir> <out_dir>
                                              [sr_fraction] [lr_fraction] [min_cells]
@@ -60,6 +62,8 @@ LINEAGE = {"B": ["Naive_B_cells", "Memory_B_cells", "Age-associated_B_cells", "P
 LINEAGE_OF = {ct: lin for lin, cts in LINEAGE.items() for ct in cts}     # everything else: T/NK
 # prior sd of design effects: platform (flat), lineage, cell type (overridden per fit)
 DESIGN_SD = {"platform": np.inf, "lineage": 2.0, "cell_type": 1.0}
+# cell-type sd in the default joint fit (best of 0.5, 1, 2 in the held-out LR evaluation, by a small margin)
+DESIGN_CT_SD = 0.5
 KAPPA0 = np.exp(-8.6)       # poly(dT) internal priming per base (Parse dT + hexamer joint fits)
 PRIMERS = ("poly(dT)", "random hexamer")
 
@@ -162,9 +166,9 @@ def lr_libraries(sources, names, fraction, rates, model, seed=0, test_fraction=0
                                               "cell": cell[sel], "tx_idx": z["tx_idx"][sel], "start": z["tstart"][sel],
                                               "end": z["tend"][sel], "tlen": z["tlen"][sel]}))
             off += int(mol.max()) + 1
-        a = pd.concat(parts, ignore_index=True)
+        a = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=["read", "cell"])
         del parts
-        new = libraries_from_molecules(a, groups, names, rates, model=model, platform="long")
+        new = libraries_from_molecules(a, groups, names, rates, model=model, platform="long") if len(a) else {}
         libs.update(new)
         if tparts:
             test_libs.update(libraries_from_molecules(pd.concat(tparts, ignore_index=True), groups, names, rates,
@@ -313,17 +317,21 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
     units = ctx["units"]
 
     # LR alone (with truncation) is the baseline; SR alone cannot identify isoforms, so it is not fitted.
-    # joint: SR and LR abundances per cell type shrunk towards a shared profile at transcript level
-    # (the best model in the held-out LR evaluation); joint_shared: one abundance vector per cell type.
+    # joint (default): design prior over (cell type, platform) units, i.e. intercept + platform + lineage +
+    # cell type effects with unit noise (the best model in the held-out LR evaluation); joint_tpool: SR and LR
+    # abundances per cell type shrunk towards a shared profile (warm start); joint_shared: one abundance vector
+    # per cell type.
     both = {**sr_libs, **lr_libs}
     fits = {"LR": (lr_libs, True, False, None, None),
             "joint_plain": (both, False, False, None, None),
             "joint_shared": (both, True, True, None, "joint_plain"),
-            "joint": (both, True, True, "transcript", "joint_shared")}
+            "joint_tpool": (both, True, True, "transcript", "joint_shared"),
+            "joint": (both, True, True, "design", "joint_tpool")}
     tpm, summary, bias, done = {}, [], [], {}
     for fit, (lib_dict, use_models, use_length, pool, init) in fits.items():
         t0 = time.time()
-        out = fit_one(ctx, lib_dict, use_models, use_length, init=done.get(init), pool=pool, pool_tau=POOL_TAU)
+        out = fit_one(ctx, lib_dict, use_models, use_length, init=done.get(init), pool=pool, pool_tau=POOL_TAU,
+                      design_sd={"cell_type": DESIGN_CT_SD})
         res, present = out["res"], out["present"]
         done[fit] = (present, res.theta)
         for i, u in enumerate(present):
@@ -333,6 +341,13 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
             labels, prof = out["em"].pooled_profile()
             for j, lab in enumerate(labels):
                 tpm[f"{fit}|{units[lab]}"] = molar_to_tpm(prof[j])
+        if pool == "design":
+            # consensus per cell type: intercept + lineage + cell type effects, platform averaged
+            rows, _, _ = design_units([(ct, "LR") for ct in units], units, {**DESIGN_SD, "cell_type": DESIGN_CT_SD},
+                                      platform=0.5)
+            prof = out["em"].design_profile(rows)
+            for j, ct in enumerate(units):
+                tpm[f"{fit}|{ct}"] = molar_to_tpm(prof[j])
         if use_models:
             bias.append(bias_table(fit, out))
         sr_kappa = out["sr_kappa"]
