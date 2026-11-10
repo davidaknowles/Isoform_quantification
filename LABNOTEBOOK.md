@@ -230,6 +230,23 @@ Transcript-level pooling with τ = 1 is best at every depth and score, and the o
 
 Default joint fit on all data (`joint_celltype.py`: joint = transcript-level pooling, τ = 1, warm-started from joint_shared): 671M EC positions, 3 h 15 min on 16 cores, peak 99 GB; the pooled fit took 7,420 s (8 outer iterations, final run 3,439 MM steps), all fits converged. SR poly(dT) unspliced scale correction 1.59 (shared) → 0.16 (pooled). Pooled units differ strongly between platforms in pre-mRNA: unspliced TPM share median 0.50 for SR units (Parse whole cells, hexamer priming) and 0.06 for LR units (10x full-length cDNA), consensus 0.22 (shared fit 0.15). Within-gene isoform fractions (spliced, genes > 10 TPM in both) differ between a cell type's SR and LR units by median gene TV 0.29 (0.12–0.41), which includes isoforms SR cannot separate; the consensus differs from the shared fit by median gene TV 0.11. CD8a/a and cycling T cells have only one platform, so their consensus equals that unit.
 
+### 2026-11-10 Design prior across cell types and platforms; convergence
+
+Model (`JointEM(pool="design")`): for units u = (cell type, platform), $\log\theta_{ut} = c_u + X_u B_t + \epsilon_{ut}$, $\epsilon \sim N(0, \tau^2)$, with $X_u$ (D) coding intercept (flat), LR platform (flat), lineage (T/NK, B, myeloid; sd 2) and cell type (sd $\sigma_{ct}$), $B_t$ (D) the effects of transcript t, $c_u$ free unit offsets. Every unit is active on every transcript seen in some library, so transcripts without reads in a unit are shrunk by its expected-read term towards the lineage and global profiles, and the profile is one closed-form ridge solve for all transcripts.
+
+Held-out LR log-likelihood per molecule, fit − LR ($\epsilon = 10^{-6}$), 1 / 5 / 20% LR training, τ = 1:
+
+| fit | all | within gene |
+|---|---|---|
+| transcript pooling | +0.143 / +0.025 / +0.0047 | +0.077 / +0.014 / +0.0022 |
+| design, σ_ct = 0.5 | +0.284 / +0.076 / +0.022 | +0.210 / +0.063 / +0.019 |
+| design, σ_ct = 1 | +0.282 / +0.076 / +0.022 | +0.208 / +0.062 / +0.018 |
+| design, σ_ct = 2 | +0.277 / +0.074 / +0.021 | +0.204 / +0.060 / +0.018 |
+
+The design prior roughly doubles to quadruples the gain and is positive for all 21 cell types at 1%, including the two without SR (CD8a/a +5.6, cycling T +1.16 overall) and CRTAM+ γδ T within genes (+1.03, was −1.13). σ_ct matters little (0.5 marginally best). Part of the gain is that the design model leaves almost no held-out molecules at zero probability (0.01% vs 0.26% for transcript pooling at 1%); with $\epsilon = 10^{-9}$ all gains grow (design +0.45 / +0.33 overall / within gene at 1%, transcript pooling +0.23 / +0.12). A rescoring restricted to molecules with positive probability under every fit (fits.pkl are saved) would separate the two effects.
+
+Convergence. The design fits needed 7,800–10,700 MM steps in the final run (old code: one profile/update alternation per M-step, SQUAREM). Simulation (6 cell types × 2 platforms) located the cause in the M-step coupling: 1,980 MM steps with one alternation, 711 with ten, 111 with an exact per-transcript M-step (batched Newton on the 40-unit surrogate with B profiled out, $Q = (I - X\,\mathrm{proj})/\tau^2$), which however costs ~70 s per step at full size. Anderson acceleration (memory 5, in log θ, rejecting candidates that lower the log posterior) gave 119 steps with one alternation and 63 with three in simulation, and 103 vs 1,893 for transcript pooling; gene pooling and unpooled fits stayed faster with SQUAREM. On real data (smoke scale: 1% SR, 0.5% LR) the gain was much smaller: the pooled joint fit's MM steps fell from 3,482 to 2,220 (36%), and wall time rose (1,480 → 3,353 s EM, partly a slower node, partly Anderson's per-step overhead on 40 × T arrays). Real-data slowness is mostly EM-type (isoform ambiguity across 215 libraries) inside the outer bias loop, not prior coupling.
+
 ### 2026-11-02 Scaling the joint fit to all molecules
 
 Profile of the 5% fit (20–50M EC positions, L = 215 libraries, K = 21 one-hot units, T ≈ 250k): EM dominates (bias M-steps and weight updates < 3%), and per MM step the dense (L, T) work (π θ products and fresh 430 MB temporaries) cost more than the Rust kernels. Changes and measurements (16 threads, real Kinnex + Parse libraries unless noted):
