@@ -2,7 +2,7 @@
 
 Joint short-read (SR) + long-read (LR) isoform quantification across many samples: LR gives identifiability, SR gives coverage. Pure transcript-level quantification. Details and results are in [LABNOTEBOOK.md](LABNOTEBOOK.md).
 
-Status as of 2026-11-07.
+Status as of 2026-11-10.
 
 ## 1. Bulk method development (WTC11, SG-NEx, simulations)
 
@@ -24,11 +24,13 @@ Done
 - Primer-specific read-position models; poly(dT) internal-priming scale on unspliced targets.
 - Joint fit on all ~1B molecules (671M EC positions), all stages converge; unspliced share 6–27% per cell type.
 - Findings: Parse coverage is broad for both primers; 10x Kinnex reads often end upstream of GENCODE 3' ends.
-- Default joint fit = transcript-level platform pooling (τ = 1), refitted on all data (3 h 15 min, 16 cores); outputs SR, LR and consensus abundances per cell type.
-- Held-out LR evaluation (fixed 10% of LR molecules; training on 1–90%): a hard-shared abundance per cell type loses to LR alone, platform-specific gene totals break even, and partial pooling across platforms wins. Transcript-level pooling (τ = 1) is best at every depth, overall and within genes (+0.143 / +0.077 nats per held-out molecule at 1% LR training), positive for 19 of 21 cell types.
+- Default joint fit = design prior across cell types and platforms (intercept + platform + lineage + cell type effects, unit noise); previous default (transcript-level platform pooling) refitted on all data in 3 h 15 min; full refit with the design prior pending faster convergence.
+- Held-out LR evaluation (fixed 10% of LR molecules; training on 1–90%). With eps-smoothing, platform pooling and the design prior appeared to gain a lot (+0.14 and +0.28 nats per molecule at 1%), but rescoring only molecules with positive probability under every fit shows those gains came from the ~2% of held-out molecules that LR alone leaves at zero probability. On the common molecules platform pooling loses to LR alone and only the design prior gains, modestly (+0.010 per molecule at 1%, +0.002 at 20%).
 
 Open
-- Learn τ (currently fixed at 1, chosen by held-out likelihood); possibly separate τ for spliced and unspliced targets (pre-mRNA share differs most between platforms).
+- Control: LR-only fit with the same design prior across cell types (no SR), to separate what SR adds from what cross-cell-type sharing adds; score unseen-transcript molecules consistently across fits.
+- Convergence of the design fit (~10k MM steps): bias models fixed from the warm start, Anderson overhead, step-count benchmarks on one node.
+- Learn τ and the design sds (currently chosen by held-out likelihood); possibly separate τ for spliced and unspliced targets.
 - Other held-out designs: whole LR libraries or donors, agreement with the Parse Kinnex same-chemistry library.
 - Sharing across cell types: tree or design-matrix prior (platform pooling exists; cell types are still not shared).
 - Posterior uncertainty, or identifiable isoform groups, for isoform-level scoring.
@@ -54,6 +56,6 @@ Open
 
 ## Next, in order
 
-1. Cross-cell-type prior (design matrix or tree), extending the pooling machinery; variational inference for uncertainty.
+1. LR-only design-prior control and design-fit convergence; then refit all data with the design prior; variational inference for uncertainty.
 2. Baselines on the bulk sets.
 3. Atlas: ENCODE4 bulk LR + Tabula Sapiens SS2 with composition estimation.
