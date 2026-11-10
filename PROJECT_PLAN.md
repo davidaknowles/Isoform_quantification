@@ -32,7 +32,7 @@ Open
 - Convergence of the design fit (~10k MM steps): bias models fixed from the warm start, Anderson overhead, step-count benchmarks on one node.
 - Learn τ and the design sds (currently chosen by held-out likelihood); possibly separate τ for spliced and unspliced targets.
 - Other held-out designs: whole LR libraries or donors, agreement with the Parse Kinnex same-chemistry library.
-- Sharing across cell types: tree or design-matrix prior (platform pooling exists; cell types are still not shared).
+- Sharing across cell types: design-matrix prior implemented (intercept, platform, lineage, cell type); extend to donors and conditions.
 - Posterior uncertainty, or identifiable isoform groups, for isoform-level scoring.
 - Optional: 3' ends as poly(A)-site choice within an isoform.
 
