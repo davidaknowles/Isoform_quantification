@@ -247,6 +247,19 @@ The design prior roughly doubles to quadruples the gain and is positive for all 
 
 Convergence. The design fits needed 7,800–10,700 MM steps in the final run (old code: one profile/update alternation per M-step, SQUAREM). Simulation (6 cell types × 2 platforms) located the cause in the M-step coupling: 1,980 MM steps with one alternation, 711 with ten, 111 with an exact per-transcript M-step (batched Newton on the 40-unit surrogate with B profiled out, $Q = (I - X\,\mathrm{proj})/\tau^2$), which however costs ~70 s per step at full size. Anderson acceleration (memory 5, in log θ, rejecting candidates that lower the log posterior) gave 119 steps with one alternation and 63 with three in simulation, and 103 vs 1,893 for transcript pooling; gene pooling and unpooled fits stayed faster with SQUAREM. On real data (smoke scale: 1% SR, 0.5% LR) the gain was much smaller: the pooled joint fit's MM steps fell from 3,482 to 2,220 (36%), and wall time rose (1,480 → 3,353 s EM, partly a slower node, partly Anderson's per-step overhead on 40 × T arrays). Real-data slowness is mostly EM-type (isoform ambiguity across 215 libraries) inside the outer bias loop, not prior coupling.
 
+Rescore without smoothing (`analyses/parse/heldout_rescore.py`, `JointEM.ec_logprob`): every saved fit scored on the held-out ECs with positive probability under all fits of that training fraction (97.6%, 99.3%, 99.8%, 99.95% of held-out molecules at 1, 5, 20, 90%; within gene 98.3–99.96%). Fit − LR per molecule, all / within gene:
+
+| fit | 1% | 5% | 20% |
+|---|---|---|---|
+| joint (shared) | −0.255 / −0.132 | −0.106 / −0.041 | −0.038 / −0.011 |
+| joint_gene | −0.047 / −0.052 | −0.015 / −0.017 | −0.003 / −0.004 |
+| gene pooling τ = 1 | −0.051 / −0.052 | −0.016 / −0.017 | −0.003 / −0.004 |
+| transcript pooling τ = 0.3 | −0.036 / −0.022 | −0.010 / −0.006 | −0.002 / −0.002 |
+| transcript pooling τ = 1 | −0.041 / −0.041 | −0.016 / −0.017 | −0.005 / −0.006 |
+| design σ_ct = 0.5 / 1 / 2 | +0.010 / +0.011 | +0.004 / +0.004 | +0.002 / +0.002 |
+
+So the pooling gains under $\epsilon$-smoothing came from the 0.05–2.4% of held-out molecules that LR alone leaves at zero probability (transcripts unseen in its training reads), which the smoothing penalises heavily; on the molecules every fit can explain, platform pooling loses to LR alone, and only the design prior gains, modestly (+0.010 per molecule at 1%, +0.002 at 20%). Interpretation: on the common molecules SR still pulls LR-relevant abundances away from what held-out LR prefers, unless the prior also shares information across cell types. The magnitude of the zero-probability effect is set by how LR-only fits treat unseen transcripts, so the fair control is an LR-only fit with the same design prior across cell types (no SR), which separates what SR adds from what cross-cell-type sharing adds.
+
 ### 2026-11-02 Scaling the joint fit to all molecules
 
 Profile of the 5% fit (20–50M EC positions, L = 215 libraries, K = 21 one-hot units, T ≈ 250k): EM dominates (bias M-steps and weight updates < 3%), and per MM step the dense (L, T) work (π θ products and fresh 430 MB temporaries) cost more than the Rust kernels. Changes and measurements (16 threads, real Kinnex + Parse libraries unless noted):
