@@ -1,0 +1,89 @@
+"""
+Convergence benchmark for the design-prior joint fit on one cached problem.
+
+Stage "prepare": build smoke-scale libraries (SR and LR fractions), fit joint_plain, joint_shared and
+joint_tpool (transcript pooling) and pickle the libraries and fits.
+Stage "variant <name>": load the pickle and fit the design prior from the joint_tpool warm start with one
+setting of bias-model warm start / early outer stop, acceleration and design M-step alternations;
+writes <dir>/variant_<name>.tsv (MM steps, outer iterations, seconds, final log posterior).
+
+Run: python analyses/bench/design_convergence.py prepare <sr_dirs> <lr_dirs> <ref_dir> <dir> <sr_fraction> <lr_fraction>
+     python analyses/bench/design_convergence.py variant <dir> <name>
+"""
+
+import pickle
+import sys
+import time
+from pathlib import Path
+
+import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "parse"))
+import joint_celltype as jc  # noqa: E402
+
+CTX_KEYS = ["names", "tx_len", "unspliced", "units", "unit_idx", "gene_groups", "genes"]
+# name: (copy bias models from joint_tpool + early outer stop, accelerate, design alternations)
+VARIANTS = {"fresh_anderson_x3": (False, "anderson", 3), "warm_anderson_x3": (True, "anderson", 3),
+            "warm_anderson_x1": (True, "anderson", 1), "warm_squarem_x1": (True, "squarem", 1),
+            "warm_squarem_x3": (True, "squarem", 3)}
+
+
+def strip(out):
+    return {k: v for k, v in out.items() if k not in ("em", "label")}
+
+
+def prepare(sr_dirs, kdir, ref_dir, d, sr_fraction, lr_fraction):
+    d = Path(d)
+    d.mkdir(parents=True, exist_ok=True)
+    ctx = jc.prepare(sr_dirs, kdir, ref_dir)
+    sr_libs, lr_libs, _ = jc.build_libraries(ctx, sr_fraction, lr_fraction)
+    both = {**sr_libs, **lr_libs}
+    outs = {}
+    for fit, use_models, use_length, pool, init in [("joint_plain", False, False, None, None),
+                                                    ("joint_shared", True, True, None, "joint_plain"),
+                                                    ("joint_tpool", True, True, "transcript", "joint_shared")]:
+        t0 = time.time()
+        prev = outs.get(init)
+        out = jc.fit_one(ctx, both, use_models, use_length, pool=pool, pool_tau=jc.POOL_TAU,
+                         init=None if prev is None else (prev["present"], prev["res"].theta))
+        outs[fit] = strip(out)
+        print(f"{fit}: {out['res'].n_iter} MM steps in final run, {time.time() - t0:.0f} s", flush=True)
+    with open(d / "prepared.pkl", "wb") as fh:
+        pickle.dump({"ctx": {k: ctx[k] for k in CTX_KEYS}, "libs": both, "outs": outs}, fh, protocol=4)
+
+
+def variant(d, name):
+    d = Path(d)
+    with open(d / "prepared.pkl", "rb") as fh:
+        z = pickle.load(fh)
+    warm, acc, inner = VARIANTS[name]
+    tp = z["outs"]["joint_tpool"]
+    lines = []
+    import builtins
+    orig = builtins.print
+    def capture(*a, **k):                         # count outer iterations and MM steps from fit_bias output
+        msg = " ".join(str(x) for x in a)
+        if msg.startswith("[bias]"):
+            lines.append(msg)
+        orig(*a, **k)
+    builtins.print = capture
+    t0 = time.time()
+    out = jc.fit_one(z["ctx"], z["libs"], True, True, init=(tp["present"], tp["res"].theta), pool="design",
+                     pool_tau=jc.POOL_TAU, design_sd={"cell_type": jc.DESIGN_CT_SD},
+                     init_models=tp if warm else None, outer_tol=1e-8 if warm else None,
+                     run_kw={"accelerate": acc}, em_kw={"design_inner": inner})
+    secs = time.time() - t0
+    builtins.print = orig
+    steps = sum(int(l.split("n_iter=")[1].split()[0]) for l in lines)
+    row = {"variant": name, "warm_models": warm, "accelerate": acc, "alternations": inner, "outer": len(lines) - 1,
+           "mm_steps_total": steps, "final_run_steps": out["res"].n_iter, "seconds": round(secs),
+           "log_posterior": out["res"].loglik[-1], "converged": out["res"].converged}
+    print(row, flush=True)
+    pd.DataFrame([row]).to_csv(d / f"variant_{name}.tsv", sep="\t", index=False)
+
+
+if __name__ == "__main__":
+    if sys.argv[1] == "prepare":
+        prepare(*sys.argv[2:6], float(sys.argv[6]), float(sys.argv[7]))
+    else:
+        variant(sys.argv[2], sys.argv[3])

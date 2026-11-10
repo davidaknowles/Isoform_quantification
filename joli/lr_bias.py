@@ -692,7 +692,7 @@ def bias_weights(tx, feat, base_c, base_b, trunc=None, length=None, frag=None):
 
 
 def fit_bias(em, trunc=None, length=None, frag=None, n_outer=10, run_kw=None, verbose=False, inner_max_iter=500,
-             init_theta=None, aggregate=True):
+             init_theta=None, aggregate=True, outer_tol=None):
     """
     Alternate JointEM runs (warm-started) with bias-model M-steps.
 
@@ -710,6 +710,9 @@ def fit_bias(em, trunc=None, length=None, frag=None, n_outer=10, run_kw=None, ve
         n_outer: number of outer iterations.
         inner_max_iter : MM-step cap for the fits between bias updates (the final fit uses run_kw).
         init_theta : (K, T) | None -- warm start of the first fit (e.g. from a fit without bias models).
+        outer_tol : stop the outer loop early (one more bias update and the final run) once an outer
+                 iteration raises the log posterior by less than outer_tol * |log posterior|, e.g. when the
+                 bias models are warm-started from a converged fit.
         aggregate : evaluate model weights and M-steps once per unique (transcript, features) key
                  (_KeyTables), with the per-position passes in the compiled kernels when available;
                  False evaluates them per position (reference implementation).
@@ -793,6 +796,9 @@ def fit_bias(em, trunc=None, length=None, frag=None, n_outer=10, run_kw=None, ve
     apply()
     res = em.run(init_theta=init_theta, **inner_kw)
     t_run, t_m, t_apply = time.time() - t0, 0.0, 0.0
+    if verbose:
+        print(f"[bias] initial: loglik={res.loglik[-1]:.6e} n_iter={res.n_iter} (s: EM {t_run:.0f})", flush=True)
+    prev, stop = res.loglik[-1], False
     for it in range(n_outer):
         t0 = time.time()
         # one M-step per model object, pooling the libraries that share it
@@ -824,7 +830,8 @@ def fit_bias(em, trunc=None, length=None, frag=None, n_outer=10, run_kw=None, ve
         apply()
         t2 = time.time()
         # floor so transcripts zeroed by the previous run's final round can return
-        kw = run_kw if it == n_outer - 1 else inner_kw
+        last = it == n_outer - 1 or stop
+        kw = run_kw if last else inner_kw
         res = em.run(init_theta=np.maximum(res.theta, 1e-10), **kw)
         t_m += t1 - t0
         t_apply += t2 - t1
@@ -832,6 +839,10 @@ def fit_bias(em, trunc=None, length=None, frag=None, n_outer=10, run_kw=None, ve
         if verbose:
             print(f"[bias] outer {it + 1}: loglik={res.loglik[-1]:.6e} n_iter={res.n_iter} "
                   f"(cumulative s: EM {t_run:.0f}, M-steps {t_m:.0f}, weights {t_apply:.0f})", flush=True)
+        if last:
+            break
+        gain, prev = res.loglik[-1] - prev, res.loglik[-1]
+        stop = outer_tol is not None and gain < outer_tol * abs(prev)
     if pool:
         pool.shutdown()
     return res

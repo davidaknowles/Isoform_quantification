@@ -13,6 +13,7 @@ from every LR library. Fits use a training fraction of the remaining molecules:
          shared cell-type profile, log-scale sd tau (warm-started from joint)
   joint_design_ct<sd>[_tau<tau>]  (only when requested) design prior across cell types: unit log
          abundances = intercept + platform + lineage + cell type (sd <sd>) + unit noise (tau, default 1)
+  LR_design_ct<sd>[_tau<tau>]  (only when requested) control: the same design prior on long reads alone
 Each held-out LR library (cell type x kit x source library) is scored at the fit's
 abundances for its cell type and the fit's bias models for its kit:
 ll = sum_e n_e log sum_t mu_t c_et - N log sum_t mu_t b_t, over ECs with read-end
@@ -48,6 +49,8 @@ from joli.joint import JointEM, molar_to_tpm  # noqa: E402
 from joli.lr_bias import bias_weights  # noqa: E402
 
 EPS = (1e-6, 1e-9)
+# warm-started fits copy the previous fit's bias models and stop the outer loop once it gains less than this
+OUTER_TOL = 1e-8
 
 
 def score(ctx, fit, out, test_libs, genes):
@@ -85,11 +88,14 @@ def needed(only):
     start from joint, the design fits from joint_tpool_t1 (closest model), joint from joint_plain."""
     if only is None:
         return None
-    need = set(only) | {"joint_plain"}
-    if any(f == "joint_gene" or "pool" in f or "design" in f for f in only):
-        need.add("joint")
-    if any("design" in f for f in only):
+    need = set(only)
+    joint_design = any(f.startswith("joint_design") for f in only)
+    if any(f == "joint_gene" or "pool" in f or joint_design or f == "joint" for f in only):
+        need |= {"joint", "joint_plain"}
+    if joint_design:
         need.add("joint_tpool_t1")
+    if any(f.startswith("LR_design") for f in only):
+        need.add("LR")
     return need
 
 
@@ -106,7 +112,7 @@ def main(sr_dirs, kdir, ref_dir, out_dir, lr_train_fraction, test_fraction=0.1, 
     t2g = pd.read_csv(Path(ref_dir) / "t2g.tsv", sep="\t", header=None, index_col=0)[1]
     genes = pd.factorize(t2g.reindex(ctx["names"]))[0]                 # -1 where unmapped
     rows, summary, tpm, saved = [], [], {}, {}
-    inits = {}
+    inits, outs = {}, {}
     both = {**sr_libs, **lr_libs}
     configs = [("LR", lr_libs, True, False, False, None, None),
                ("joint_plain", both, False, False, False, None, None),
@@ -121,13 +127,21 @@ def main(sr_dirs, kdir, ref_dir, out_dir, lr_train_fraction, test_fraction=0.1, 
         if m:
             configs.append((f, both, True, True, False, ("design", float(m.group(2) or 1.0),
                                                           {"cell_type": float(m.group(1))}), "joint_tpool_t1"))
+        # control: the same design prior across cell types on long reads alone (no SR, no LR length bias)
+        m = re.fullmatch(r"LR_design_ct([0-9.]+)(?:_tau([0-9.]+))?", f)
+        if m:
+            configs.append((f, lr_libs, True, False, False, ("design", float(m.group(2) or 1.0),
+                                                              {"cell_type": float(m.group(1))}), "LR"))
     for fit, lib_dict, use_models, use_length, pg, pool, init in configs:
         if only is not None and fit not in needed(only):
             continue
         t0 = time.time()
         out = jc.fit_one(ctx, lib_dict, use_models, use_length, init=inits.get(init), platform_genes=pg,
                          pool=None if pool is None else pool[0], pool_tau=1.0 if pool is None else pool[1],
-                         design_sd=pool[2] if pool is not None and len(pool) > 2 else None)
+                         design_sd=pool[2] if pool is not None and len(pool) > 2 else None,
+                         init_models=outs.get(init) if use_models else None,
+                         outer_tol=OUTER_TOL if outs.get(init) is not None and use_models else None)
+        outs[fit] = out if use_models else None
         res = out["res"]
         inits[fit] = (out["present"], res.theta)
         if fit == "joint_plain":

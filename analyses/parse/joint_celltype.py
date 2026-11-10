@@ -228,7 +228,7 @@ def build_libraries(ctx, sr_fraction, lr_fraction, lr_test_fraction=0.0):
 
 
 def fit_one(ctx, lib_dict, use_models, use_length, init=None, verbose=True, platform_genes=False, pool=None,
-            pool_tau=1.0, design_sd=None):
+            pool_tau=1.0, design_sd=None, init_models=None, outer_tol=None, n_outer=8, run_kw=None, em_kw=None):
     """
     Fit one configuration. Bias models are shared per platform x primer/kit: SR position profiles
     (poly(dT): distance to the 3' end; hexamer: relative position) and the SR poly(dT) unspliced
@@ -241,7 +241,9 @@ def fit_one(ctx, lib_dict, use_models, use_length, init=None, verbose=True, plat
     cell types: log abundances of the (cell type, platform) units follow intercept + platform + lineage
     + cell type effects (design_units; prior sds DESIGN_SD updated by design_sd) plus unit noise pool_tau.
     init: (unit labels, theta) of an earlier fit; per-cell-type abundances are copied to both
-    platforms of a platform_genes fit.
+    platforms of a platform_genes fit. init_models: the output of an earlier fit_one whose fitted bias
+    models are copied as starting values (with outer_tol, the outer loop then stops once the bias
+    models settle). run_kw: overrides of RUN_KW (e.g. accelerate); em_kw: extra JointEM options.
     Returns dict with res, present (unit labels), label (library key -> unit label), keys and models.
     """
     tx_len, unspliced, unit_idx = ctx["tx_len"], ctx["unspliced"], ctx["unit_idx"]
@@ -250,6 +252,15 @@ def fit_one(ctx, lib_dict, use_models, use_length, init=None, verbose=True, plat
     lr_models = {}
     lr_length = {} if use_length else None
     sr_kappa = LengthBias(tx_len, extra=unspliced[:, None], length_terms=False, ridge=1e-3) if use_length else None
+    if init_models is not None:
+        # start from an earlier fit's bias models (copies, so that fit's models stay as they were)
+        import copy
+        sr_models = copy.deepcopy(init_models["sr_models"])
+        lr_models = copy.deepcopy(init_models["lr_models"])
+        if use_length and init_models.get("lr_length"):
+            lr_length = copy.deepcopy(init_models["lr_length"])
+        if use_length and init_models.get("sr_kappa") is not None:
+            sr_kappa = copy.deepcopy(init_models["sr_kappa"])
     keys = sorted(lib_dict)
     libs = [lib_dict[k] for k in keys]
     platform_genes = platform_genes or pool is not None
@@ -276,17 +287,19 @@ def fit_one(ctx, lib_dict, use_models, use_length, init=None, verbose=True, plat
         X, sd, _ = design_units(present, ctx["units"], {**DESIGN_SD, **(design_sd or {})})
     em = JointEM(libs, pi=pi, unit_names=["@".join(u) if platform_genes else u for u in present],
                  tie=tie, groups=ctx["gene_groups"] if tie is not None else None, pool=pool, pool_tau=pool_tau,
-                 design=X, design_sd=sd)
+                 design=X, design_sd=sd, **(em_kw or {}))
     init_theta = None
     if init is not None:
         imap = {u: i for i, u in enumerate(init[0])}
         rows = [imap.get(u, imap.get(u[0]) if isinstance(u, tuple) else None) for u in present]
         if all(r is not None for r in rows):
             init_theta = np.maximum(init[1][rows], 1e-10)
+    kw = {**RUN_KW, **(run_kw or {})}
     if trunc or length:
-        res = fit_bias(em, trunc=trunc, length=length, n_outer=8, verbose=verbose, run_kw=RUN_KW, init_theta=init_theta)
+        res = fit_bias(em, trunc=trunc, length=length, n_outer=n_outer, verbose=verbose, run_kw=kw,
+                       init_theta=init_theta, outer_tol=outer_tol)
     else:
-        res = em.run(init_theta=init_theta, **RUN_KW)
+        res = em.run(init_theta=init_theta, **kw)
     return dict(res=res, present=present, label=label, keys=keys, sr_models=sr_models, lr_models=lr_models,
                 lr_length=lr_length, sr_kappa=sr_kappa, em=em)
 
