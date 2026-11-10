@@ -403,3 +403,26 @@ def test_anderson_matches_squarem_on_pooled_fits():
         assert _close_theta(an.theta, sq.theta, 0.01)
         lp = np.array(an.loglik[:-1])
         assert (np.diff(lp) > -1e-9 * abs(lp[-1])).all()
+
+
+def test_ec_logprob_sums_to_library_loglik():
+    from joli.joint import JointEM, Library
+    from joli.load_tcc import TCCData, FlatECs
+    rng = np.random.default_rng(6)
+    T = 60
+    names = [f"t{i}" for i in range(T)]
+    sizes = rng.integers(1, 4, size=100)
+    ptr = np.r_[0, np.cumsum(sizes)]
+    tcc = TCCData(ec_counts=rng.integers(1, 9, 100).astype(float),
+                  ec_transcripts=FlatECs(ptr, rng.integers(0, T, ptr[-1]).astype(np.int32)),
+                  transcript_names=names, total_reads=0, n_targets=T, sample_dir="")
+    em = JointEM([Library("l", tcc, b=rng.uniform(0.5, 2, T))])
+    th = em.run().theta
+    lp = em.ec_logprob(th)[0]
+    ll, _ = em.library_loglik(th)
+    assert abs(em.libs[0].counts @ lp - ll[0]) < 1e-8 * abs(ll[0])
+    g = np.arange(T) // 5
+    lw = em.ec_logprob(th, groups=g)[0]
+    llw, used, _ = em.library_loglik_within(th, g, eps=0.0)
+    ok = np.isfinite(lw)
+    assert abs(em.libs[0].counts[ok] @ lw[ok] - llw[0]) < 1e-8 * abs(llw[0])

@@ -434,6 +434,35 @@ class JointEM:
                 + (-np.inf if (~ok & (fl.counts > 0)).any() else 0.0)
         return ll, n_zero
 
+    def ec_logprob(self, theta, groups=None):
+        """
+        Per-read log-probability of each EC of each library at fixed abundances (no smoothing):
+        log sum_{t in e} mu_t c_et - log sum_t mu_t b_t, or with groups (T_full,) the probability
+        given the group, - log sum_{t in g(e)} mu_t b_t, NaN for ECs spanning several groups.
+        -inf marks ECs of zero probability. Returns a list over libraries of (n_ec,) arrays aligned
+        with each library's flat EC order (fl.counts), so scores of different fits of the same
+        libraries can be restricted to common ECs.
+        """
+        th = self._compact(np.asarray(theta, dtype=np.float64))
+        gc = None if groups is None else np.asarray(groups)[self.cols]
+        out = []
+        for l, fl in enumerate(self.libs):
+            mu = self.pi[l] @ th
+            d = np.bincount(fl.ec, weights=mu[fl.txc] * fl.c, minlength=fl.n_ec)
+            with np.errstate(divide="ignore"):
+                ld = np.log(d)
+            if gc is None:
+                out.append(ld - np.log(mu @ fl.bc))
+                continue
+            g = gc[fl.txc]
+            gmin = np.minimum.reduceat(g, fl.ec_ptr[:-1])
+            gmax = np.maximum.reduceat(g, fl.ec_ptr[:-1])
+            Bg = np.bincount(np.maximum(gc, 0), weights=np.where(gc >= 0, mu * fl.bc, 0.0), minlength=int(gc.max()) + 1)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                lp = ld - np.log(Bg[np.maximum(gmin, 0)])
+            out.append(np.where((gmin == gmax) & (gmin >= 0), lp, np.nan))
+        return out
+
     def library_loglik_within(self, theta, groups, eps=0.0):
         """
         Within-group log-likelihood of each library at fixed abundances: over ECs whose
