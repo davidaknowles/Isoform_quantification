@@ -260,6 +260,15 @@ Rescore without smoothing (`analyses/parse/heldout_rescore.py`, `JointEM.ec_logp
 
 So the pooling gains under $\epsilon$-smoothing came from the 0.05–2.4% of held-out molecules that LR alone leaves at zero probability (transcripts unseen in its training reads), which the smoothing penalises heavily; on the molecules every fit can explain, platform pooling loses to LR alone, and only the design prior gains, modestly (+0.010 per molecule at 1%, +0.002 at 20%). Interpretation: on the common molecules SR still pulls LR-relevant abundances away from what held-out LR prefers, unless the prior also shares information across cell types. The magnitude of the zero-probability effect is set by how LR-only fits treat unseen transcripts, so the fair control is an LR-only fit with the same design prior across cell types (no SR), which separates what SR adds from what cross-cell-type sharing adds.
 
+LR-only design control (`LR_design_ct<sd>`: the same design prior on long reads alone, units (cell type, LR), no SR and no LR length bias). Unsmoothed rescore, fit − LR per molecule, all / within gene:
+
+| fit | 1% | 5% | 20% |
+|---|---|---|---|
+| LR_design, σ_ct = 0.5 | +0.0108 / +0.0122 | +0.0048 / +0.0052 | +0.0023 / +0.0024 |
+| joint_design, σ_ct = 0.5 | +0.0104 / +0.0112 | +0.0044 / +0.0043 | +0.0018 / +0.0015 |
+
+With smoothing ($\epsilon = 10^{-6}$) the two are also equal (1%: LR_design +0.281 / +0.209, joint_design +0.284 / +0.210, all / within gene). Per cell type at 1% (within gene), adding SR to the design fit changes the held-out score by −0.007 to +0.005 per molecule and helps only 3 of 21 types (plasma cells +0.005, naive B +0.0007, memory B +0.0005). So every gain over LR alone seen in this evaluation comes from sharing information across cell types (and from giving unseen transcripts shrunk abundances); the Parse SR, from other donors, does not improve prediction of held-out 10x Kinnex LR at any depth. Caveats: held-out LR likelihood rewards matching the LR platform's own distribution (including its biases), so SR could still correct LR biases without this metric showing it; and SR and LR come from different donors. An evaluation with truth not defined by one platform (spike-ins, or same-cell SR and LR) is needed to test what SR adds.
+
 ### 2026-11-02 Scaling the joint fit to all molecules
 
 Profile of the 5% fit (20–50M EC positions, L = 215 libraries, K = 21 one-hot units, T ≈ 250k): EM dominates (bias M-steps and weight updates < 3%), and per MM step the dense (L, T) work (π θ products and fresh 430 MB temporaries) cost more than the Rust kernels. Changes and measurements (16 threads, real Kinnex + Parse libraries unless noted):

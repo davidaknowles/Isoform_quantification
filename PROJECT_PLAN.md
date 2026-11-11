@@ -25,10 +25,10 @@ Done
 - Joint fit on all ~1B molecules (671M EC positions), all stages converge; unspliced share 6–27% per cell type.
 - Findings: Parse coverage is broad for both primers; 10x Kinnex reads often end upstream of GENCODE 3' ends.
 - Default joint fit = design prior across cell types and platforms (intercept + platform + lineage + cell type effects, unit noise); previous default (transcript-level platform pooling) refitted on all data in 3 h 15 min; full refit with the design prior pending faster convergence.
-- Held-out LR evaluation (fixed 10% of LR molecules; training on 1–90%). With eps-smoothing, platform pooling and the design prior appeared to gain a lot (+0.14 and +0.28 nats per molecule at 1%), but rescoring only molecules with positive probability under every fit shows those gains came from the ~2% of held-out molecules that LR alone leaves at zero probability. On the common molecules platform pooling loses to LR alone and only the design prior gains, modestly (+0.010 per molecule at 1%, +0.002 at 20%).
+- Held-out LR evaluation (fixed 10% of LR molecules; training on 1–90%). With eps-smoothing, platform pooling and the design prior appeared to gain a lot (+0.14 and +0.28 nats per molecule at 1%), but rescoring only molecules with positive probability under every fit shows those gains came from the ~2% of held-out molecules that LR alone leaves at zero probability. On the common molecules platform pooling loses to LR alone and only the design prior gains, modestly (+0.010 per molecule at 1%, +0.002 at 20%). An LR-only fit with the same design prior gains as much (+0.011 at 1%), so the gain is cross-cell-type sharing; Parse SR (other donors) adds nothing to held-out 10x LR prediction.
 
 Open
-- Control: LR-only fit with the same design prior across cell types (no SR), to separate what SR adds from what cross-cell-type sharing adds; score unseen-transcript molecules consistently across fits.
+- Evaluate what SR adds with truth not defined by one platform: spike-ins (SG-NEx, WTC11 SIRVs) for the design/pooling models, or same-cell SR and LR (e.g. LR-Split-seq, IGVF Parse SR + ONT on the same nuclei); held-out LR likelihood cannot credit SR for correcting LR biases.
 - Convergence of the design fit (~10k MM steps): bias models fixed from the warm start, Anderson overhead, step-count benchmarks on one node.
 - Learn τ and the design sds (currently chosen by held-out likelihood); possibly separate τ for spliced and unspliced targets.
 - Other held-out designs: whole LR libraries or donors, agreement with the Parse Kinnex same-chemistry library.
@@ -56,6 +56,6 @@ Open
 
 ## Next, in order
 
-1. LR-only design-prior control and design-fit convergence; then refit all data with the design prior; variational inference for uncertainty.
+1. Design-fit convergence; evaluation of what SR adds with platform-independent truth (spike-ins, same-cell SR + LR); then refit all data; variational inference for uncertainty.
 2. Baselines on the bulk sets.
 3. Atlas: ENCODE4 bulk LR + Tabula Sapiens SS2 with composition estimation.
