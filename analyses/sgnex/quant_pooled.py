@@ -10,13 +10,19 @@ each library with its own bias model as in quant.py. Fits:
   design     units (replicate, protocol): log abundance = intercept + protocol (flat) + cell line (sd 2)
              + replicate (sd REP_SD) + unit noise (tau 1)
   LR_design  the same design prior on the two ONT protocols alone (control for what SR adds)
+  gene       units (replicate, protocol) sharing within-gene isoform fractions, with protocol-specific
+             gene totals (JointEM tie/groups)
+  gpool_t<tau>  as gene, with protocol gene totals shrunk towards the replicate's (log-scale sd tau)
 Pooled fits start from the previous fit's abundances and bias models. Per replicate, the pooled fits
 report each protocol's unit (<fit>@<protocol>) and a consensus (<fit>): the shared profile for tpool,
-the design profile with protocol effects averaged for design and LR_design.
+the design profile with protocol effects averaged for design and LR_design, and the geometric mean of
+the protocol units for gene and gpool (shared within-gene fractions times geometric-mean gene totals).
+An optional comma-separated list of fits runs only those (plus their warm starts) and adds their
+columns to existing output files.
 
 Writes {out_dir}/{cell}_rep{rep}_tpm.tsv.gz (scored by spikein_eval.py) and fits.tsv.
 
-Run: python analyses/sgnex/quant_pooled.py <sgnex_dir> <out_dir>
+Run: python analyses/sgnex/quant_pooled.py <sgnex_dir> <out_dir> [fits]
 """
 
 import copy
@@ -77,7 +83,8 @@ def design_rows(units, protocols, average=False):
     return X, sd
 
 
-def fit(libs, keys, frag_init, tx_len, by_protocol, pool=None, protocols=PROTOCOLS, prev=None, verbose=True):
+def fit(libs, keys, frag_init, tx_len, by_protocol, pool=None, protocols=PROTOCOLS, prev=None, verbose=True,
+        groups=None, tau=TAU):
     """
     One fit over libraries `keys` ((stem, protocol)); units are stems, or (stem, protocol) when
     by_protocol. prev: an earlier fit's output, for warm-starting abundances and bias models.
@@ -87,8 +94,13 @@ def fit(libs, keys, frag_init, tx_len, by_protocol, pool=None, protocols=PROTOCO
     pi = np.zeros((len(keys), len(units)))
     pi[np.arange(len(keys)), [uidx[k if by_protocol else k[0]] for k in keys]] = 1.0
     kw = {}
+    tie = [[s for s, _ in units].index(s) for s, _ in units] if by_protocol else None
     if pool == "transcript":
-        kw = dict(tie=[[s for s, _ in units].index(s) for s, _ in units], pool="transcript", pool_tau=TAU)
+        kw = dict(tie=tie, pool="transcript", pool_tau=tau)
+    elif pool in ("gene_tied", "gene"):
+        kw = dict(tie=tie, groups=groups)
+        if pool == "gene":
+            kw.update(pool="gene", pool_tau=tau)
     elif pool == "design":
         X, sd = design_rows(units, protocols)
         kw = dict(pool="design", design=X, design_sd=sd, pool_tau=TAU)
@@ -115,24 +127,37 @@ def fit(libs, keys, frag_init, tx_len, by_protocol, pool=None, protocols=PROTOCO
     return {"res": res, "units": units, "em": em, "models": models, "protocols": protocols}
 
 
-def main(sgnex_dir, out_dir):
+def main(sgnex_dir, out_dir, only=None):
     sgnex_dir, out_dir = Path(sgnex_dir), Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     names, tx_len = read_fasta_lengths(sgnex_dir / "ref" / "hg38_sequins_SIRV_ERCCs_longSIRVs_cdna.fa")
+    t2g = pd.read_csv(sgnex_dir / "ref" / "t2g.tsv", sep="\t", header=None, index_col=0)[1]
+    genes = pd.factorize(t2g.reindex(names))[0]
     libs, frag_init = load(sgnex_dir, names, tx_len)
     all_keys = sorted(libs)
     lr_keys = [k for k in all_keys if k[1] != "SR"]
     stems = [f"{c}_rep{r}" for c, r in REPLICATES]
     tpm = {s: {} for s in stems}
     summary, outs = [], {}
-    plan = [("LR", lr_keys, False, None, PROTOCOLS[1:], None),
-            ("joint", all_keys, False, None, PROTOCOLS, None),
-            ("tpool", all_keys, True, "transcript", PROTOCOLS, "joint"),
-            ("design", all_keys, True, "design", PROTOCOLS, "tpool"),
-            ("LR_design", lr_keys, True, "design", PROTOCOLS[1:], "LR")]
-    for name, keys, by_proto, pool, protos, init in plan:
+    plan = [("LR", lr_keys, False, None, PROTOCOLS[1:], None, TAU),
+            ("joint", all_keys, False, None, PROTOCOLS, None, TAU),
+            ("tpool", all_keys, True, "transcript", PROTOCOLS, "joint", TAU),
+            ("design", all_keys, True, "design", PROTOCOLS, "tpool", TAU),
+            ("LR_design", lr_keys, True, "design", PROTOCOLS[1:], "LR", TAU),
+            ("gene", all_keys, True, "gene_tied", PROTOCOLS, "joint", TAU)]
+    plan += [(f"gpool_t{t:g}", all_keys, True, "gene", PROTOCOLS, "joint", t) for t in (0.3, 1.0, 3.0)]
+    if only:
+        want = set(only.split(","))
+        deps = {p[0]: p[5] for p in plan}
+        for f in list(want):
+            while deps.get(f):
+                f = deps[f]
+                want.add(f)
+        plan = [p for p in plan if p[0] in want]
+    for name, keys, by_proto, pool, protos, init, tau in plan:
         t0 = time.time()
-        out = fit(libs, keys, frag_init, tx_len, by_proto, pool=pool, protocols=protos, prev=outs.get(init))
+        out = fit(libs, keys, frag_init, tx_len, by_proto, pool=pool, protocols=protos, prev=outs.get(init),
+                  groups=genes, tau=tau)
         outs[name] = out
         res, units = out["res"], out["units"]
         for i, u in enumerate(units):
@@ -142,6 +167,13 @@ def main(sgnex_dir, out_dir):
             labels, prof = out["em"].pooled_profile()        # tie labels: index of each stem's first unit
             for j, lab in enumerate(labels):
                 tpm[units[lab][0]][name] = molar_to_tpm(prof[j])
+        if pool in ("gene_tied", "gene"):
+            # consensus: geometric mean of the protocol units (shared within-gene fractions)
+            for s in stems:
+                rows = [i for i, u in enumerate(units) if u[0] == s]
+                lg = np.log(np.maximum(res.theta[rows], 1e-300)).mean(axis=0)
+                g = np.exp(lg - lg.max())
+                tpm[s][name] = molar_to_tpm(g / g.sum())
         if pool == "design":
             cons = [(s, protos[0]) for s in stems]
             X, _ = design_rows(cons, protos, average=True)
@@ -152,9 +184,18 @@ def main(sgnex_dir, out_dir):
                         "converged": res.converged, "seconds": round(time.time() - t0, 1)})
         print(summary[-1], flush=True)
     for s in stems:
-        pd.DataFrame(tpm[s], index=names).to_csv(out_dir / f"{s}_tpm.tsv.gz", sep="\t", float_format="%.6g")
-    pd.DataFrame(summary).to_csv(out_dir / "fits.tsv", sep="\t", index=False)
+        df = pd.DataFrame(tpm[s], index=names)
+        f = out_dir / f"{s}_tpm.tsv.gz"
+        if only and f.exists():                    # add the new columns to an earlier run's output
+            old = pd.read_csv(f, sep="\t", index_col=0)
+            df = pd.concat([old.drop(columns=[c for c in df.columns if c in old.columns]), df], axis=1)
+        df.to_csv(f, sep="\t", float_format="%.6g")
+    fits_f = out_dir / "fits.tsv"
+    summ = pd.DataFrame(summary)
+    if only and fits_f.exists():
+        summ = pd.concat([pd.read_csv(fits_f, sep="\t"), summ]).drop_duplicates("fit", keep="last")
+    summ.to_csv(fits_f, sep="\t", index=False)
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:3])
+    main(*sys.argv[1:4])
