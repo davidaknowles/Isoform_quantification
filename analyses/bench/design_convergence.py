@@ -22,10 +22,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "parse"))
 import joint_celltype as jc  # noqa: E402
 
 CTX_KEYS = ["names", "tx_len", "unspliced", "units", "unit_idx", "gene_groups", "genes"]
-# name: (copy bias models from joint_tpool + early outer stop, accelerate, design alternations)
-VARIANTS = {"fresh_anderson_x3": (False, "anderson", 3), "warm_anderson_x3": (True, "anderson", 3),
-            "warm_anderson_x1": (True, "anderson", 1), "warm_squarem_x1": (True, "squarem", 1),
-            "warm_squarem_x3": (True, "squarem", 3)}
+# name: (model, copy bias models from the warm start + early outer stop, accelerate, design alternations)
+VARIANTS = {"fresh_anderson_x3": ("design", False, "anderson", 3), "warm_anderson_x3": ("design", True, "anderson", 3),
+            "warm_anderson_x1": ("design", True, "anderson", 1), "warm_squarem_x1": ("design", True, "squarem", 1),
+            "warm_squarem_x3": ("design", True, "squarem", 3),
+            "gene_warm_squarem": ("gene", True, "squarem", 1), "gene_warm_anderson": ("gene", True, "anderson", 1),
+            "gpool_warm_squarem": ("gpool", True, "squarem", 1), "gpool_warm_anderson": ("gpool", True, "anderson", 1)}
 
 
 def strip(out):
@@ -56,8 +58,9 @@ def variant(d, name):
     d = Path(d)
     with open(d / "prepared.pkl", "rb") as fh:
         z = pickle.load(fh)
-    warm, acc, inner = VARIANTS[name]
-    tp = z["outs"]["joint_tpool"]
+    model, warm, acc, inner = VARIANTS[name]
+    # design starts from transcript pooling; gene-level fits from the shared joint fit
+    tp = z["outs"]["joint_tpool" if model == "design" else "joint_shared"]
     lines = []
     import builtins
     orig = builtins.print
@@ -68,14 +71,18 @@ def variant(d, name):
         orig(*a, **k)
     builtins.print = capture
     t0 = time.time()
-    out = jc.fit_one(z["ctx"], z["libs"], True, True, init=(tp["present"], tp["res"].theta), pool="design",
-                     pool_tau=jc.POOL_TAU, design_sd={"cell_type": jc.DESIGN_CT_SD},
+    kw = dict(pool="design", design_sd={"cell_type": jc.DESIGN_CT_SD}, em_kw={"design_inner": inner})
+    if model == "gene":
+        kw = dict(platform_genes=True)
+    elif model == "gpool":
+        kw = dict(pool="gene")
+    out = jc.fit_one(z["ctx"], z["libs"], True, True, init=(tp["present"], tp["res"].theta), pool_tau=jc.POOL_TAU,
                      init_models=tp if warm else None, outer_tol=1e-8 if warm else None,
-                     run_kw={"accelerate": acc}, em_kw={"design_inner": inner})
+                     run_kw={"accelerate": acc}, **kw)
     secs = time.time() - t0
     builtins.print = orig
     steps = sum(int(l.split("n_iter=")[1].split()[0]) for l in lines)
-    row = {"variant": name, "warm_models": warm, "accelerate": acc, "alternations": inner, "outer": len(lines) - 1,
+    row = {"variant": name, "model": model, "warm_models": warm, "accelerate": acc, "alternations": inner, "outer": len(lines) - 1,
            "mm_steps_total": steps, "final_run_steps": out["res"].n_iter, "seconds": round(secs),
            "log_posterior": out["res"].loglik[-1], "converged": out["res"].converged}
     print(row, flush=True)
