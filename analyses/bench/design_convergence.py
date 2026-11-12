@@ -32,8 +32,12 @@ VARIANTS = {"fresh_anderson_x3": ("design", False, "anderson", 3), "warm_anderso
             "warm_anderson_x1_w1": ("design", True, "anderson", 1, {"ll_window": 1}),
             "warm_anderson_x1_w10": ("design", True, "anderson", 1, {"ll_window": 10}),
             "ref_anderson_tight": ("design", True, "anderson", 1, {"ll_window": 20, "ll_rel_tol": 1e-13, "max_iter": 50000}),
-            "warm_squarem_x1_save": ("design", True, "squarem", 1, {})}
-SAVE_THETA = {"warm_anderson_x1_w1", "warm_anderson_x1_w10", "ref_anderson_tight", "warm_squarem_x1_save"}
+            "warm_squarem_x1_save": ("design", True, "squarem", 1, {}),
+            # true reference: theta-change rule effectively off, tight log-posterior rule, long cap
+            "ref_anderson_true": ("design", True, "anderson", 1, {"rel_tol": 1e-8, "ll_window": 20,
+                                                                  "ll_rel_tol": 1e-14, "max_iter": 100000})}
+SAVE_THETA = {"warm_anderson_x1_w1", "warm_anderson_x1_w10", "ref_anderson_tight", "warm_squarem_x1_save",
+              "ref_anderson_true"}
 
 
 def strip(out):
