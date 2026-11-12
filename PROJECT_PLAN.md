@@ -2,7 +2,7 @@
 
 Joint short-read (SR) + long-read (LR) isoform quantification across many samples: LR gives identifiability, SR gives coverage. Pure transcript-level quantification. Details and results are in [LABNOTEBOOK.md](LABNOTEBOOK.md).
 
-Status as of 2026-11-10.
+Status as of 2026-11-11.
 
 ## 1. Bulk method development (WTC11, SG-NEx, simulations)
 
@@ -28,7 +28,8 @@ Done
 - Held-out LR evaluation (fixed 10% of LR molecules; training on 1–90%). With eps-smoothing, platform pooling and the design prior appeared to gain a lot (+0.14 and +0.28 nats per molecule at 1%), but rescoring only molecules with positive probability under every fit shows those gains came from the ~2% of held-out molecules that LR alone leaves at zero probability. On the common molecules platform pooling loses to LR alone and only the design prior gains, modestly (+0.010 per molecule at 1%, +0.002 at 20%). An LR-only fit with the same design prior gains as much (+0.011 at 1%), so the gain is cross-cell-type sharing; Parse SR (other donors) adds nothing to held-out 10x LR prediction.
 
 Open
-- Evaluate what SR adds with truth not defined by one platform: spike-ins (SG-NEx, WTC11 SIRVs) for the design/pooling models, or same-cell SR and LR (e.g. LR-Split-seq, IGVF Parse SR + ONT on the same nuclei); held-out LR likelihood cannot credit SR for correcting LR biases.
+- SG-NEx spike-ins (done): only the shared fit lets SR improve isoform fractions (SIRV-4 gene TV 0.230 → 0.143); SR's isoform information comes mostly through shared gene totals (length-weighted abundance of within-gene-ambiguous fragments), which decoupled models discard. Default model by design: shared fit for matched samples, design prior for unmatched donors.
+- Same-cell or same-donor SR + LR (e.g. LR-Split-seq, IGVF Parse SR + ONT on the same nuclei) to test SR's isoform contribution in single cell, where gene totals can be shared.
 - Convergence of the design fit (~10k MM steps): bias models fixed from the warm start, Anderson overhead, step-count benchmarks on one node.
 - Learn τ and the design sds (currently chosen by held-out likelihood); possibly separate τ for spliced and unspliced targets.
 - Other held-out designs: whole LR libraries or donors, agreement with the Parse Kinnex same-chemistry library.
@@ -56,6 +57,6 @@ Open
 
 ## Next, in order
 
-1. Design-fit convergence; evaluation of what SR adds with platform-independent truth (spike-ins, same-cell SR + LR); then refit all data; variational inference for uncertainty.
+1. Design-fit convergence (warm-started bias models, Anderson stopping on flat tails); refit PBMC data with the design prior; same-sample SR + LR single-cell data to test the shared model there; variational inference for uncertainty.
 2. Baselines on the bulk sets.
 3. Atlas: ENCODE4 bulk LR + Tabula Sapiens SS2 with composition estimation.

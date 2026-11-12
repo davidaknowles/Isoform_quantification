@@ -269,6 +269,22 @@ LR-only design control (`LR_design_ct<sd>`: the same design prior on long reads 
 
 With smoothing ($\epsilon = 10^{-6}$) the two are also equal (1%: LR_design +0.281 / +0.209, joint_design +0.284 / +0.210, all / within gene). Per cell type at 1% (within gene), adding SR to the design fit changes the held-out score by −0.007 to +0.005 per molecule and helps only 3 of 21 types (plasma cells +0.005, naive B +0.0007, memory B +0.0005). So every gain over LR alone seen in this evaluation comes from sharing information across cell types (and from giving unseen transcripts shrunk abundances); the Parse SR, from other donors, does not improve prediction of held-out 10x Kinnex LR at any depth. Caveats: held-out LR likelihood rewards matching the LR platform's own distribution (including its biases), so SR could still correct LR biases without this metric showing it; and SR and LR come from different donors. An evaluation with truth not defined by one platform (spike-ins, or same-cell SR and LR) is needed to test what SR adds.
 
+### 2026-11-11 SG-NEx spike-ins: what SR adds, by model
+
+All six SG-NEx replicates fitted together (`analyses/sgnex/quant_pooled.py`; Illumina fragments with FragmentModel, ONT direct cDNA and PCR-cDNA with AnchoredTruncationModel, per-library bias models), units (replicate, protocol) for the pooled fits. Median gene TV of isoform fractions against spike-in truth (lower is better):
+
+| mix | LR | joint (shared) | gene (shared fractions, protocol gene totals) | gene pooling τ = 0.3–3 | transcript pooling | design | LR-only design |
+|---|---|---|---|---|---|---|---|
+| SIRV-4 | 0.230 | **0.143** | 0.229 | 0.229 | 0.212 | 0.220 | 0.207 |
+| sequins | 0.092 | **0.064** | 0.091 | 0.088–0.091 | 0.079 | 0.079 | 0.090 |
+| SIRV E2 | 0.226 | **0.131** | 0.225 | 0.225 | 0.212 | 0.233 | 0.214 |
+
+Only the shared fit lets SR improve isoform fractions, by a lot (SIRV-4 0.230 → 0.143, SIRV E2 0.226 → 0.131). Sharing within-gene fractions while giving each protocol its own gene totals gives LR-level accuracy, so SR's isoform information here comes mostly through the gene totals: fragments ambiguous within a gene measure its length-weighted abundance $\sum_t \theta_t \ell_t$ ($\ell_t$ the effective length), which pins down the isoform mix only when SR and LR share gene totals. Transcript-unique SR fragments contribute little. For abundance across a mix the pattern reverses: the shared fit is worst on sequins (SD of log ratio 1.38) and SIRV E2 (1.15), while the LR units of the pooled and gene-level fits do best (direct cDNA 1.15 on sequins, 0.94–1.02 on SIRV E2).
+
+Consequence for model choice. When SR and LR measure the same RNA (SG-NEx, bulk matched samples), shared gene totals are correct and the shared fit is the best model for isoform fractions. When they come from different donors (Parse SR + 10x Kinnex LR), gene totals genuinely differ: the shared fit then loses on held-out LR, the platform-decoupled models discard SR's main isoform channel, and SR adds almost nothing beyond cross-cell-type sharing (LR-only design control). Decision: the default joint model depends on the design, the shared fit for matched samples and the design prior (cross-cell-type sharing, platform deviations) for unmatched donors, where SR contributes mainly coverage of transcripts unseen in LR.
+
+Convergence (cached smoke-scale problem, AMD nodes): design fit with fresh bias models and Anderson 3,347 MM steps / 5,016 s; with bias models warm-started from transcript pooling 2,889 steps / 2,559 s (one alternation) or 2,451 / 3,172 s (three); SQUAREM hit the 20,000-step cap but reached a log posterior ~7,000 nats (6e-5 relative) above Anderson's, so Anderson's stopping rule ends runs on a flat tail. Gene-level fits converge faster with SQUAREM (tied gene 1,573 s vs 3,981 s with Anderson; gene pooling 1,730 s).
+
 ### 2026-11-02 Scaling the joint fit to all molecules
 
 Profile of the 5% fit (20–50M EC positions, L = 215 libraries, K = 21 one-hot units, T ≈ 250k): EM dominates (bias M-steps and weight updates < 3%), and per MM step the dense (L, T) work (π θ products and fresh 430 MB temporaries) cost more than the Rust kernels. Changes and measurements (16 threads, real Kinnex + Parse libraries unless noted):
