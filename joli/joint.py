@@ -714,7 +714,8 @@ class JointEM:
         new /= new.sum(axis=1, keepdims=True)
         return new, lp
 
-    def _anderson(self, theta, a, max_iter, min_iter, rel_tol, theta_floor, ll_rel_tol, verbose, m=5, reg=1e-10):
+    def _anderson(self, theta, a, max_iter, min_iter, rel_tol, theta_floor, ll_rel_tol, verbose, m=5, reg=1e-10,
+                  ll_window=10):
         """
         Anderson acceleration (type II, memory m) of the MM map F in x = log theta on active entries:
         with residuals f_k = F(x_k) - x_k, x_{k+1} = F(x_k) - dG gamma, gamma minimising
@@ -755,8 +756,10 @@ class JointEM:
                 Fc, llc = self._update(cand, a)
                 n_steps += 1
                 Xs, Gs = [], []
-            ll_stall = ll_rel_tol is not None and 0.0 <= llc - ll < ll_rel_tol * abs(llc)
             history.append(ll)
+            # stall: the gain over the last ll_window iterates is small (single steps can be tiny on flat tails)
+            ll_stall = (ll_rel_tol is not None and len(history) >= ll_window
+                        and 0.0 <= llc - history[-ll_window] < ll_window * ll_rel_tol * abs(llc))
             prev = from_x(Xs[-1]) if Xs else theta
             diff = np.abs(cand - prev)
             changed = int(np.count_nonzero((cand > theta_floor) & (diff > rel_tol * cand)))
@@ -772,7 +775,7 @@ class JointEM:
 
     def run(self, prior=None, init_theta=None, max_iter=5000, min_iter=20,
             rel_tol=1e-2, theta_floor=1e-8, accelerate="auto", zero_below=0.01,
-            ll_rel_tol=None, verbose=False) -> JointResult:
+            ll_rel_tol=None, verbose=False, ll_window=None) -> JointResult:
         """
         Iterate until no monitored theta (> theta_floor) changes by more than
         rel_tol relatively between successive iterates (kallisto's rule; its
@@ -795,9 +798,12 @@ class JointEM:
             prior      : np.ndarray (T,) or (K, T) | None -- Dirichlet pseudo-counts a (full length).
             init_theta : np.ndarray (K, T) | None -- warm start (full length); uniform over active otherwise.
             zero_below : float | None -- expected-read threshold for final zeroing.
-            ll_rel_tol : float | None -- also stop when an iterate raises the log posterior by less
-                         than ll_rel_tol * |log posterior| (weakly identified fits, where theta drifts
-                         along nearly flat directions long after the likelihood has settled).
+            ll_rel_tol : float | None -- also stop when the last ll_window iterates together raise the log
+                         posterior by less than ll_window * ll_rel_tol * |log posterior| (weakly identified
+                         fits, where theta drifts along nearly flat directions long after the likelihood has
+                         settled).
+            ll_window  : int | None -- iterates for that rule (default 1 for SQUAREM, 10 for Anderson, whose
+                         single steps can be tiny on flat tails while the climb continues).
         """
         if init_theta is None:
             theta = self._activef / self._activef.sum(axis=1, keepdims=True)
@@ -817,7 +823,7 @@ class JointEM:
             accelerate = "anderson" if pooled else "squarem"
         if accelerate == "anderson":
             theta, history, converged, n_steps = self._anderson(theta, a, max_iter, min_iter, rel_tol, theta_floor,
-                                                                ll_rel_tol, verbose)
+                                                                ll_rel_tol, verbose, ll_window=ll_window or 10)
         while accelerate != "anderson" and n_steps < max_iter:
             t1, ll0 = self._update(theta, a)
             t2, ll1 = self._update(t1, a)
@@ -843,8 +849,9 @@ class JointEM:
                     if llp >= ll1:
                         new = t3
             # a small non-negative gain (a decrease, e.g. after a rejected extrapolation, is not convergence)
-            ll_stall = (ll_rel_tol is not None and len(history) > 0
-                        and 0.0 <= ll0 - history[-1] < ll_rel_tol * abs(ll0))
+            w = ll_window or 1
+            ll_stall = (ll_rel_tol is not None and len(history) >= w
+                        and 0.0 <= ll0 - history[-w] < w * ll_rel_tol * abs(ll0))
             history.append(ll0)
             diff = np.abs(new - theta)
             changed = int(np.count_nonzero((new > theta_floor) & (diff > rel_tol * new)))

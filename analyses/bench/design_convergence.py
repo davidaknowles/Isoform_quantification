@@ -27,7 +27,13 @@ VARIANTS = {"fresh_anderson_x3": ("design", False, "anderson", 3), "warm_anderso
             "warm_anderson_x1": ("design", True, "anderson", 1), "warm_squarem_x1": ("design", True, "squarem", 1),
             "warm_squarem_x3": ("design", True, "squarem", 3),
             "gene_warm_squarem": ("gene", True, "squarem", 1), "gene_warm_anderson": ("gene", True, "anderson", 1),
-            "gpool_warm_squarem": ("gpool", True, "squarem", 1), "gpool_warm_anderson": ("gpool", True, "anderson", 1)}
+            "gpool_warm_squarem": ("gpool", True, "squarem", 1), "gpool_warm_anderson": ("gpool", True, "anderson", 1),
+            # stopping-rule comparison (theta saved): old single-step rule, 10-iterate window, tight reference
+            "warm_anderson_x1_w1": ("design", True, "anderson", 1, {"ll_window": 1}),
+            "warm_anderson_x1_w10": ("design", True, "anderson", 1, {"ll_window": 10}),
+            "ref_anderson_tight": ("design", True, "anderson", 1, {"ll_window": 20, "ll_rel_tol": 1e-13, "max_iter": 50000}),
+            "warm_squarem_x1_save": ("design", True, "squarem", 1, {})}
+SAVE_THETA = {"warm_anderson_x1_w1", "warm_anderson_x1_w10", "ref_anderson_tight", "warm_squarem_x1_save"}
 
 
 def strip(out):
@@ -58,7 +64,8 @@ def variant(d, name):
     d = Path(d)
     with open(d / "prepared.pkl", "rb") as fh:
         z = pickle.load(fh)
-    model, warm, acc, inner = VARIANTS[name]
+    model, warm, acc, inner = VARIANTS[name][:4]
+    extra = VARIANTS[name][4] if len(VARIANTS[name]) > 4 else {}
     # design starts from transcript pooling; gene-level fits from the shared joint fit
     tp = z["outs"]["joint_tpool" if model == "design" else "joint_shared"]
     lines = []
@@ -78,7 +85,7 @@ def variant(d, name):
         kw = dict(pool="gene")
     out = jc.fit_one(z["ctx"], z["libs"], True, True, init=(tp["present"], tp["res"].theta), pool_tau=jc.POOL_TAU,
                      init_models=tp if warm else None, outer_tol=1e-8 if warm else None,
-                     run_kw={"accelerate": acc}, **kw)
+                     run_kw={"accelerate": acc, **extra}, **kw)
     secs = time.time() - t0
     builtins.print = orig
     steps = sum(int(l.split("n_iter=")[1].split()[0]) for l in lines)
@@ -87,6 +94,9 @@ def variant(d, name):
            "log_posterior": out["res"].loglik[-1], "converged": out["res"].converged}
     print(row, flush=True)
     pd.DataFrame([row]).to_csv(d / f"variant_{name}.tsv", sep="\t", index=False)
+    if name in SAVE_THETA:
+        import numpy as np
+        np.savez(d / f"theta_{name}.npz", theta=out["res"].theta, present=np.array(["@".join(u) for u in out["present"]]))
 
 
 if __name__ == "__main__":
