@@ -745,12 +745,14 @@ class JointEM:
                 A = dF.T @ dF
                 gam = np.linalg.solve(A + reg * np.trace(A) * np.eye(len(A)) + 1e-300 * np.eye(len(A)), dF.T @ f)
                 xn = Gs[-1] - dG @ gam
+                if not np.all(np.isfinite(xn)):            # degenerate least squares: plain MM image
+                    xn = Gs[-1]
             else:
                 xn = Gs[-1]
             cand = from_x(xn)
             Fc, llc = self._update(cand, a)
             n_steps += 1
-            if llc < ll - 1e-12 * abs(ll):
+            if not np.isfinite(llc) or llc < ll - 1e-12 * abs(ll):
                 # reject: take the plain MM image of the last accepted point and restart the history
                 cand = from_x(Gs[-1])
                 Fc, llc = self._update(cand, a)
