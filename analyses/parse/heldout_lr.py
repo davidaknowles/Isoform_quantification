@@ -14,6 +14,8 @@ from every LR library. Fits use a training fraction of the remaining molecules:
   joint_design_ct<sd>[_tau<tau>]  (only when requested) design prior across cell types: unit log
          abundances = intercept + platform + lineage + cell type (sd <sd>) + unit noise (tau, default 1)
   LR_design_ct<sd>[_tau<tau>]  (only when requested) control: the same design prior on long reads alone
+  joint_dgene_ct<sd>[_tau<tau>]  (only when requested) design prior on the LR units; each SR unit is its cell
+         type's LR unit rescaled per gene (short reads alone do not identify isoform abundances)
 Each held-out LR library (cell type x kit x source library) is scored at the fit's
 abundances for its cell type and the fit's bias models for its kit:
 ll = sum_e n_e log sum_t mu_t c_et - N log sum_t mu_t b_t, over ECs with read-end
@@ -90,7 +92,7 @@ def needed(only):
         return None
     need = set(only)
     joint_design = any(f.startswith("joint_design") for f in only)
-    if any(f == "joint_gene" or "pool" in f or joint_design or f == "joint" for f in only):
+    if any(f == "joint_gene" or "pool" in f or joint_design or f == "joint" or f.startswith("joint_dgene") for f in only):
         need |= {"joint", "joint_plain"}
     if joint_design:
         need.add("joint_tpool_t1")
@@ -127,6 +129,11 @@ def main(sr_dirs, kdir, ref_dir, out_dir, lr_train_fraction, test_fraction=0.1, 
         if m:
             configs.append((f, both, True, True, False, ("design", float(m.group(2) or 1.0),
                                                           {"cell_type": float(m.group(1))}), "joint_tpool_t1"))
+        # SR units rescale their cell type's LR unit per gene; design prior on the LR units
+        m = re.fullmatch(r"joint_dgene_ct([0-9.]+)(?:_tau([0-9.]+))?", f)
+        if m:
+            configs.append((f, both, True, True, False, ("design_gene", float(m.group(2) or 1.0),
+                                                          {"cell_type": float(m.group(1))}), "joint"))
         # control: the same design prior across cell types on long reads alone (no SR, no LR length bias)
         m = re.fullmatch(r"LR_design_ct([0-9.]+)(?:_tau([0-9.]+))?", f)
         if m:

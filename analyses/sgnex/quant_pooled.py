@@ -13,6 +13,8 @@ each library with its own bias model as in quant.py. Fits:
   gene       units (replicate, protocol) sharing within-gene isoform fractions, with protocol-specific
              gene totals (JointEM tie/groups)
   gpool_t<tau>  as gene, with protocol gene totals shrunk towards the replicate's (log-scale sd tau)
+  dgene      direct cDNA units carry transcript abundances with the design prior (intercept + cell line +
+             replicate); PCR-cDNA and SR units rescale their replicate's direct cDNA unit per gene
 Pooled fits start from the previous fit's abundances and bias models. Per replicate, the pooled fits
 report each protocol's unit (<fit>@<protocol>) and a consensus (<fit>): the shared profile for tpool,
 the design profile with protocol effects averaged for design and LR_design, and the geometric mean of
@@ -104,6 +106,11 @@ def fit(libs, keys, frag_init, tx_len, by_protocol, pool=None, protocols=PROTOCO
     elif pool == "design":
         X, sd = design_rows(units, protocols)
         kw = dict(pool="design", design=X, design_sd=sd, pool_tau=TAU)
+    elif pool == "design_gene":
+        bp = protocols[1]                               # base protocol: direct cDNA
+        base = [-1 if p == bp else units.index((s, bp)) for s, p in units]
+        X, sd = design_rows([u for u in units if u[1] == bp], protocols)
+        kw = dict(pool="design_gene", design=X, design_sd=sd, base=base, groups=groups, pool_tau=TAU)
     em = JointEM([libs[k] for k in keys], pi=pi, **kw)
     models = copy.deepcopy(prev["models"]) if prev is not None else {}
     trunc, frag = {}, {}
@@ -146,6 +153,7 @@ def main(sgnex_dir, out_dir, only=None):
             ("LR_design", lr_keys, True, "design", PROTOCOLS[1:], "LR", TAU),
             ("gene", all_keys, True, "gene_tied", PROTOCOLS, "joint", TAU)]
     plan += [(f"gpool_t{t:g}", all_keys, True, "gene", PROTOCOLS, "joint", t) for t in (0.3, 1.0, 3.0)]
+    plan += [("dgene", all_keys, True, "design_gene", PROTOCOLS, "joint", TAU)]
     if only:
         want = set(only.split(","))
         deps = {p[0]: p[5] for p in plan}
@@ -174,6 +182,12 @@ def main(sgnex_dir, out_dir, only=None):
                 lg = np.log(np.maximum(res.theta[rows], 1e-300)).mean(axis=0)
                 g = np.exp(lg - lg.max())
                 tpm[s][name] = molar_to_tpm(g / g.sum())
+        if pool == "design_gene":
+            cons = [(s, protos[1]) for s in stems]           # base-unit profile (protocol columns at the base)
+            X, _ = design_rows(cons, protos)
+            prof = out["em"].design_profile(X)
+            for j, s in enumerate(stems):
+                tpm[s][name] = molar_to_tpm(prof[j])
         if pool == "design":
             cons = [(s, protos[0]) for s in stems]
             X, _ = design_rows(cons, protos, average=True)

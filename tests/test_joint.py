@@ -426,3 +426,38 @@ def test_ec_logprob_sums_to_library_loglik():
     llw, used, _ = em.library_loglik_within(th, g, eps=0.0)
     ok = np.isfinite(lw)
     assert abs(em.libs[0].counts[ok] @ lw[ok] - llw[0]) < 1e-8 * abs(llw[0])
+
+
+def test_design_gene_flat_matches_tied_gene_model():
+    """One LR base unit + one SR unit scaled per gene, flat design: the tied model (shared within-gene
+    fractions, unit-specific gene totals)."""
+    from joli.joint import JointEM
+    libs, gene, _ = _two_platforms(np.random.default_rng(7), G=60, gene_shift=1.0)   # lib 0 LR-like, lib 1 SR-like
+    kw = dict(rel_tol=1e-9, max_iter=50000, zero_below=None, accelerate="squarem")
+    tied = JointEM(libs, units=[0, 1], tie=[0, 0], groups=gene).run(**kw)
+    dg = JointEM(libs, units=[0, 1], pool="design_gene", design=np.ones((1, 1)), design_sd=np.array([np.inf]),
+                 base=[-1, 0], groups=gene, pool_tau=1.0).run(**kw)
+    assert _close_theta(tied.theta, dg.theta, 0.01)
+    # the SR unit has the LR unit's within-gene fractions
+    th = dg.theta
+    f = lambda v: v / np.bincount(gene, v)[gene]
+    np.testing.assert_allclose(f(th[0]), f(th[1]), atol=1e-6)
+
+
+def test_design_gene_converges_fast_and_shares_cell_types():
+    import sys, os
+    sys.path.insert(0, os.path.dirname(__file__))
+    from sim_design import design_problem
+    from joli.joint import JointEM
+    libs, X, truth, gene = design_problem(np.random.default_rng(0), K=6, lr_reads=600)
+    K = X.shape[0]                                   # units alternate SR (even), LR (odd)
+    base = [k + 1 if k % 2 == 0 else -1 for k in range(K)]
+    Xb = X[1::2][:, [0] + list(range(2, X.shape[1]))]   # base (LR) units: intercept + cell type
+    sd = np.r_[np.inf, np.full(Xb.shape[1] - 1, 0.5)]
+    res = JointEM(libs, units=list(range(K)), pool="design_gene", design=Xb, design_sd=sd, base=base,
+                  groups=gene, pool_tau=0.5).run(rel_tol=1e-6, ll_rel_tol=1e-12, max_iter=20000)
+    sep = JointEM(libs[1::2], units=list(range(K // 2))).run(rel_tol=1e-6, max_iter=20000)
+    err = lambda th, tr: np.mean([0.5 * np.abs(th[i] - tr[i]).sum() for i in range(len(tr))])
+    e_dg, e_sep = err(res.theta[1::2], truth[1::2]), err(sep.theta, truth[1::2])
+    assert res.converged, res.n_iter
+    assert e_dg < e_sep, (e_dg, e_sep)

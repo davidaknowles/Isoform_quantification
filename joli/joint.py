@@ -167,6 +167,11 @@ class JointEM:
                     share information across cell types.
         design    : (K, D) design matrix of the units (pool="design").
         design_sd : (D,) prior sd of each column's effects (np.inf for unpenalised columns).
+        base      : (K,) int, for pool="design_gene": -1 for base units (which carry transcript abundances
+                    with the design prior; design has one row per base unit, in unit order), or the index of
+                    the base unit that a scaled unit rescales per group: theta_ut = R_ug theta_bt (shared
+                    within-group fractions, free group totals; e.g. SR units on their cell type's LR unit,
+                    with genes as groups and unspliced targets as groups of their own).
         design_mstep : "alternate" | "exact" -- design M-step: design_inner rounds alternating the profile
                     and the per-entry update (default), or per-transcript Newton on the MM surrogate with
                     B profiled out (unit offsets held; fewer MM steps but ~100x costlier per step).
@@ -177,7 +182,7 @@ class JointEM:
 
     def __init__(self, libraries, pi=None, units=None, unit_names=None, backend="auto", threads=None,
                  sort_ecs=True, tie=None, groups=None, tie_iter=1, pool=None, pool_tau=1.0, design=None,
-                 design_sd=None, design_mstep="alternate", design_inner=3):
+                 design_sd=None, design_mstep="alternate", design_inner=3, base=None):
         from . import native
         if backend == "auto":
             backend = "rust" if native.available() else "numpy"
@@ -237,7 +242,28 @@ class JointEM:
         self._N = np.array([fl.N for fl in self.libs])
         self._tie = None
         self._pooling = None
-        if pool == "design":
+        if pool == "design_gene":
+            base = np.asarray(base, dtype=np.int64)
+            bunits = np.flatnonzero(base < 0)
+            X = np.asarray(design, dtype=np.float64)
+            sd = np.asarray(design_sd, dtype=np.float64)
+            if len(base) != self.K or X.shape[0] != len(bunits) or sd.shape != (X.shape[1],):
+                raise ValueError("design_gene needs base per unit and one design row per base unit")
+            if np.any(base[base >= 0] < 0) or np.any(base[base[base >= 0]] >= 0):
+                raise ValueError("scaled units must point at base units")
+            tau2 = float(pool_tau) ** 2
+            lam = np.where(np.isfinite(sd), 1.0 / np.maximum(sd, 1e-300) ** 2, 0.0)
+            proj = np.linalg.pinv(X.T @ X / tau2 + np.diag(lam)) @ X.T / tau2
+            g = np.asarray(groups, dtype=np.int64)[self.cols].copy()
+            lone = g < 0
+            g[lone] = g.max() + 1 + np.arange(lone.sum())
+            gc, _ = pd.factorize(g)
+            self._pooling = {"level": "design_gene", "tau2": tau2, "state": None, "X": X, "lam": lam,
+                             "proj": proj, "base": base, "bunits": bunits, "gc": gc.astype(np.int64),
+                             "n_g": int(gc.max()) + 1, "inner": int(design_inner)}
+            self.active[:] = self.active.any(axis=0)
+            self._activef = self.active.astype(np.float64)
+        elif pool == "design":
             X = np.asarray(design, dtype=np.float64)
             sd = np.asarray(design_sd, dtype=np.float64)
             if X.shape[0] != self.K or sd.shape != (X.shape[1],):
@@ -529,13 +555,61 @@ class JointEM:
         new /= new.sum(axis=1, keepdims=True)
         return new, lp
 
+    def _design_gene_mstep(self, theta, Z, D):
+        """
+        MAP-MM step for pool="design_gene": base units carry x = log theta with the design prior; each
+        scaled unit s on base b is theta_s = R_sg theta_b. The profile (c, B) of the base units is maximised
+        at the input; then design_inner rounds of R_sg = Z_sg / sum_{t in g} D_st e^{x_bt} (closed form)
+        and, per base entry, the exact maximiser of (Z_b + sum_s Z_s) x - (D_b + sum_s R_s D_s) e^x
+        - (x - m)^2 / (2 tau^2); each step raises the surrogate.
+        """
+        P = self._pooling
+        base, bunits, gc, n_g = P["base"], P["bunits"], P["gc"], P["n_g"]
+        agg = lambda v: np.bincount(gc, weights=v, minlength=n_g)
+        xb = np.log(np.maximum(theta[bunits], 1e-300))
+        c = xb.mean(axis=1)
+        B = P["proj"] @ (xb - c[:, None])
+        m = c[:, None] + P["X"] @ B
+        r = xb - m
+        lp = float(-0.5 * (r * r).sum() / P["tau2"] - 0.5 * (P["lam"] @ (B * B).sum(axis=1)))
+        row_of = {int(u): i for i, u in enumerate(bunits)}
+        scaled = [(int(s), row_of[int(base[s])]) for s in np.flatnonzero(base >= 0)]
+        Zb, Db = Z[bunits].copy(), D[bunits]
+        for s, i in scaled:
+            Zb[i] += Z[s]
+        R = {}
+        for it in range(P["inner"]):
+            if it:
+                c = xb.mean(axis=1)
+                m = c[:, None] + P["X"] @ (P["proj"] @ (xb - c[:, None]))
+            Dn = Db.copy()
+            for s, i in scaled:
+                den = agg(D[s] * np.exp(xb[i]))
+                R[s] = np.divide(agg(Z[s]), den, out=np.zeros(n_g), where=den > 0)
+                R[s] += 1e-9 * R[s].sum() / n_g            # keep scaled units positive in groups without reads
+                Dn[i] += R[s][gc] * D[s]
+            xb = _newton_lognormal(xb, Zb, Dn, m, P["tau2"], True)
+        c = xb.mean(axis=1)
+        P["state"] = (c, P["proj"] @ (xb - c[:, None]))
+        new = np.zeros_like(theta)
+        eb = np.exp(xb - xb.max(axis=1, keepdims=True))
+        new[bunits] = eb
+        for s, i in scaled:
+            den = agg(D[s] * np.exp(xb[i]))
+            Rs = np.divide(agg(Z[s]), den, out=np.zeros(n_g), where=den > 0)
+            Rs += 1e-9 * Rs.sum() / n_g
+            new[s] = Rs[gc] * eb[i]
+        new *= self._activef
+        new /= new.sum(axis=1, keepdims=True)
+        return new, lp
+
     def design_profile(self, rows):
         """
         Molar fractions exp(r . B) normalised over transcripts for design rows r (n, D) (e.g. a cell
         type's intercept + lineage + cell-type columns without platform), from the last M-step.
         Returns (n, T_full).
         """
-        if self._pooling is None or self._pooling["level"] != "design" or self._pooling["state"] is None:
+        if self._pooling is None or self._pooling["level"] not in ("design", "design_gene") or self._pooling["state"] is None:
             raise ValueError("needs a fitted design-pooled model")
         B = self._pooling["state"][1]
         e = np.atleast_2d(np.asarray(rows, dtype=np.float64)) @ B
@@ -578,6 +652,11 @@ class JointEM:
             if a is not None:
                 raise NotImplementedError("design pooling with a Dirichlet prior")
             new, lp = self._pooled_design_mstep(theta, Z, D)
+            return new, ll + lp
+        if self._pooling is not None and self._pooling["level"] == "design_gene":
+            if a is not None:
+                raise NotImplementedError("design pooling with a Dirichlet prior")
+            new, lp = self._design_gene_mstep(theta, Z, D)
             return new, ll + lp
         if self._tie is not None:
             if a is not None:
@@ -821,7 +900,7 @@ class JointEM:
         n_steps = 0
         it = 0
         if accelerate == "auto":
-            pooled = self._pooling is not None and self._pooling["level"] in ("transcript", "design")
+            pooled = self._pooling is not None and self._pooling["level"] in ("transcript", "design", "design_gene")
             accelerate = "anderson" if pooled else "squarem"
         if accelerate == "anderson":
             theta, history, converged, n_steps = self._anderson(theta, a, max_iter, min_iter, rel_tol, theta_floor,
@@ -864,7 +943,7 @@ class JointEM:
             if n_steps >= min_iter and (changed == 0 or ll_stall):
                 converged = True
                 break
-        if zero_below is not None and self._pooling is not None and self._pooling["level"] == "design":
+        if zero_below is not None and self._pooling is not None and self._pooling["level"] in ("design", "design_gene"):
             zero_below = None              # the design prior gives unseen transcripts shrunk abundances
         if zero_below is not None:
             Z, _, _, _ = self._estep(theta)

@@ -240,6 +240,9 @@ def fit_one(ctx, lib_dict, use_models, use_length, init=None, verbose=True, plat
     shared cell-type profile with log-scale sd pool_tau (JointEM pool). pool="design" adds sharing across
     cell types: log abundances of the (cell type, platform) units follow intercept + platform + lineage
     + cell type effects (design_units; prior sds DESIGN_SD updated by design_sd) plus unit noise pool_tau.
+    pool="design_gene": the design prior on each cell type's LR unit only; its SR unit is the LR unit rescaled
+    per gene (shared within-gene isoform fractions, free SR gene and pre-mRNA totals), since short reads
+    alone do not identify isoform abundances. SR libraries of cell types without LR are left out.
     init: (unit labels, theta) of an earlier fit; per-cell-type abundances are copied to both
     platforms of a platform_genes fit. init_models: the output of an earlier fit_one whose fitted bias
     models are copied as starting values (with outer_tol, the outer loop then stops once the bias
@@ -262,6 +265,12 @@ def fit_one(ctx, lib_dict, use_models, use_length, init=None, verbose=True, plat
         if use_length and init_models.get("sr_kappa") is not None:
             sr_kappa = copy.deepcopy(init_models["sr_kappa"])
     keys = sorted(lib_dict)
+    if pool == "design_gene":
+        lr_types = {k.split("|")[0] for k in keys if k.split("|")[1] == "LR"}
+        dropped = [k for k in keys if k.split("|")[0] not in lr_types]
+        if dropped:
+            print(f"design_gene: leaving out {len(dropped)} SR libraries of cell types without LR", flush=True)
+        keys = [k for k in keys if k.split("|")[0] in lr_types]
     libs = [lib_dict[k] for k in keys]
     platform_genes = platform_genes or pool is not None
     label = (lambda k: (k.split("|")[0], k.split("|")[1])) if platform_genes else (lambda k: k.split("|")[0])
@@ -282,12 +291,16 @@ def fit_one(ctx, lib_dict, use_models, use_length, init=None, verbose=True, plat
     pi = np.zeros((len(libs), len(present)))
     pi[np.arange(len(libs)), [local[label(k)] for k in keys]] = 1.0
     tie = [unit_idx[u[0]] for u in present] if platform_genes and pool != "design" else None
-    X = sd = None
+    X = sd = base = None
     if pool == "design":
         X, sd, _ = design_units(present, ctx["units"], {**DESIGN_SD, **(design_sd or {})})
+    elif pool == "design_gene":
+        # base units: (cell type, LR); SR units point at their cell type's LR unit
+        base = [-1 if plat == "LR" else present.index((ct, "LR")) for ct, plat in present]
+        X, sd, _ = design_units([u for u in present if u[1] == "LR"], ctx["units"], {**DESIGN_SD, **(design_sd or {})})
     em = JointEM(libs, pi=pi, unit_names=["@".join(u) if platform_genes else u for u in present],
-                 tie=tie, groups=ctx["gene_groups"] if tie is not None else None, pool=pool, pool_tau=pool_tau,
-                 design=X, design_sd=sd, **(em_kw or {}))
+                 tie=tie, groups=ctx["gene_groups"] if (tie is not None or pool == "design_gene") else None,
+                 pool=pool, pool_tau=pool_tau, design=X, design_sd=sd, base=base, **(em_kw or {}))
     init_theta = None
     if init is not None:
         imap = {u: i for i, u in enumerate(init[0])}

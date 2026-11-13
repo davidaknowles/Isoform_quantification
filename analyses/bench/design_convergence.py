@@ -38,9 +38,15 @@ VARIANTS = {"fresh_anderson_x3": ("design", False, "anderson", 3), "warm_anderso
                                                                   "ll_rel_tol": 1e-14, "max_iter": 100000}),
             # finite prior sd on the platform effect (flat by default): anderson default stop vs capped SQUAREM
             **{f"psd{p:g}_{acc}": ("design", True, acc, 1, {}, {"platform": p}) for p in (0.5, 1.0, 2.0)
-               for acc in ("anderson", "squarem")}}
+               for acc in ("anderson", "squarem")},
+            # SR units rescale their cell type's LR unit per gene (design prior on LR units only)
+            "dgene_anderson_x3": ("design_gene", True, "anderson", 3), "dgene_squarem_x3": ("design_gene", True, "squarem", 3),
+            "dgene_anderson_x10": ("design_gene", True, "anderson", 10),
+            "dgene_ref": ("design_gene", True, "anderson", 10, {"rel_tol": 1e-8, "ll_window": 20, "ll_rel_tol": 1e-14,
+                                                               "max_iter": 30000})}
 SAVE_THETA = {"warm_anderson_x1_w1", "warm_anderson_x1_w10", "ref_anderson_tight", "warm_squarem_x1_save",
               "ref_anderson_true"} | {f"psd{p:g}_{acc}" for p in (0.5, 1.0, 2.0) for acc in ("anderson", "squarem")}
+SAVE_THETA |= {"dgene_anderson_x3", "dgene_squarem_x3", "dgene_anderson_x10", "dgene_ref"}
 
 
 def strip(out):
@@ -74,7 +80,7 @@ def variant(d, name):
     model, warm, acc, inner = VARIANTS[name][:4]
     extra = VARIANTS[name][4] if len(VARIANTS[name]) > 4 else {}
     sd_extra = VARIANTS[name][5] if len(VARIANTS[name]) > 5 else {}
-    # design starts from transcript pooling; gene-level fits from the shared joint fit
+    # design starts from transcript pooling; gene-level and design_gene fits from the shared joint fit
     tp = z["outs"]["joint_tpool" if model == "design" else "joint_shared"]
     lines = []
     import builtins
@@ -87,7 +93,9 @@ def variant(d, name):
     builtins.print = capture
     t0 = time.time()
     kw = dict(pool="design", design_sd={"cell_type": jc.DESIGN_CT_SD, **sd_extra}, em_kw={"design_inner": inner})
-    if model == "gene":
+    if model == "design_gene":
+        kw = dict(pool="design_gene", design_sd={"cell_type": jc.DESIGN_CT_SD, **sd_extra}, em_kw={"design_inner": inner})
+    elif model == "gene":
         kw = dict(platform_genes=True)
     elif model == "gpool":
         kw = dict(pool="gene")
