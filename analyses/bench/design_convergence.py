@@ -35,9 +35,12 @@ VARIANTS = {"fresh_anderson_x3": ("design", False, "anderson", 3), "warm_anderso
             "warm_squarem_x1_save": ("design", True, "squarem", 1, {}),
             # true reference: theta-change rule effectively off, tight log-posterior rule, long cap
             "ref_anderson_true": ("design", True, "anderson", 1, {"rel_tol": 1e-8, "ll_window": 20,
-                                                                  "ll_rel_tol": 1e-14, "max_iter": 100000})}
+                                                                  "ll_rel_tol": 1e-14, "max_iter": 100000}),
+            # finite prior sd on the platform effect (flat by default): anderson default stop vs capped SQUAREM
+            **{f"psd{p:g}_{acc}": ("design", True, acc, 1, {}, {"platform": p}) for p in (0.5, 1.0, 2.0)
+               for acc in ("anderson", "squarem")}}
 SAVE_THETA = {"warm_anderson_x1_w1", "warm_anderson_x1_w10", "ref_anderson_tight", "warm_squarem_x1_save",
-              "ref_anderson_true"}
+              "ref_anderson_true"} | {f"psd{p:g}_{acc}" for p in (0.5, 1.0, 2.0) for acc in ("anderson", "squarem")}
 
 
 def strip(out):
@@ -70,6 +73,7 @@ def variant(d, name):
         z = pickle.load(fh)
     model, warm, acc, inner = VARIANTS[name][:4]
     extra = VARIANTS[name][4] if len(VARIANTS[name]) > 4 else {}
+    sd_extra = VARIANTS[name][5] if len(VARIANTS[name]) > 5 else {}
     # design starts from transcript pooling; gene-level fits from the shared joint fit
     tp = z["outs"]["joint_tpool" if model == "design" else "joint_shared"]
     lines = []
@@ -82,7 +86,7 @@ def variant(d, name):
         orig(*a, **k)
     builtins.print = capture
     t0 = time.time()
-    kw = dict(pool="design", design_sd={"cell_type": jc.DESIGN_CT_SD}, em_kw={"design_inner": inner})
+    kw = dict(pool="design", design_sd={"cell_type": jc.DESIGN_CT_SD, **sd_extra}, em_kw={"design_inner": inner})
     if model == "gene":
         kw = dict(platform_genes=True)
     elif model == "gpool":
