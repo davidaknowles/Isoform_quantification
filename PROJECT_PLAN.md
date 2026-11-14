@@ -2,7 +2,7 @@
 
 Joint short-read (SR) + long-read (LR) isoform quantification across many samples: LR gives identifiability, SR gives coverage. Pure transcript-level quantification. Details and results are in [LABNOTEBOOK.md](LABNOTEBOOK.md).
 
-Status as of 2026-11-11.
+Status as of 2026-11-14.
 
 ## 1. Bulk method development (WTC11, SG-NEx, simulations)
 
@@ -30,7 +30,8 @@ Done
 Open
 - SG-NEx spike-ins (done): only the shared fit lets SR improve isoform fractions (SIRV-4 gene TV 0.230 → 0.143); SR's isoform information comes mostly through shared gene totals (length-weighted abundance of within-gene-ambiguous fragments), which decoupled models discard. Default model by design: shared fit for matched samples, design prior for unmatched donors.
 - Same-cell or same-donor SR + LR (e.g. LR-Split-seq, IGVF Parse SR + ONT on the same nuclei) to test SR's isoform contribution in single cell, where gene totals can be shared.
-- Convergence of the design fit (~10k MM steps): bias models fixed from the warm start, Anderson overhead, step-count benchmarks on one node.
+- design_gene (SR units = LR unit rescaled per gene; design prior on LR units): converges (SQUAREM, ~1 h at smoke scale, agrees with a 30k-step reference); best abundance on SG-NEx spike-ins; on held-out PBMC LR it loses like joint_gene (−0.049 at 1%), while the LR-only design control gains (+0.011).
+- Decide the PBMC default: LR-only design prior (best held-out LR), or design_gene (uses SR for gene and pre-mRNA totals, best spike-in abundance); and whether SR from other donors should inform isoforms at all.
 - Learn τ and the design sds (currently chosen by held-out likelihood); possibly separate τ for spliced and unspliced targets.
 - Other held-out designs: whole LR libraries or donors, agreement with the Parse Kinnex same-chemistry library.
 - Sharing across cell types: design-matrix prior implemented (intercept, platform, lineage, cell type); extend to donors and conditions.
@@ -57,6 +58,6 @@ Open
 
 ## Next, in order
 
-1. Design-fit convergence (warm-started bias models, Anderson stopping on flat tails); refit PBMC data with the design prior; same-sample SR + LR single-cell data to test the shared model there; variational inference for uncertainty.
+1. Choose the PBMC default (LR-only design vs design_gene) and refit all data; same-sample SR + LR single-cell data to test the shared model there; variational inference for uncertainty.
 2. Baselines on the bulk sets.
 3. Atlas: ENCODE4 bulk LR + Tabula Sapiens SS2 with composition estimation.

@@ -285,6 +285,20 @@ Consequence for model choice. When SR and LR measure the same RNA (SG-NEx, bulk 
 
 Convergence (cached smoke-scale problem, AMD nodes): design fit with fresh bias models and Anderson 3,347 MM steps / 5,016 s; with bias models warm-started from transcript pooling 2,889 steps / 2,559 s (one alternation) or 2,451 / 3,172 s (three); SQUAREM hit the 20,000-step cap but reached a log posterior ~7,000 nats (6e-5 relative) above Anderson's, so Anderson's stopping rule ends runs on a flat tail. Gene-level fits converge faster with SQUAREM (tied gene 1,573 s vs 3,981 s with Anderson; gene pooling 1,730 s).
 
+### 2026-11-14 Short reads at gene level only (design_gene); convergence resolved
+
+Design-fit convergence. Even 100,000 MM steps did not converge the design fit (log posterior still rising; 9,100 nats above Anderson's stopping point, 2,500 above SQUAREM at 20,000 steps). Against the 100,000-step solution, LR units were stable across all solutions (TPM TV ≤ 0.002, within-gene TV p90 ≤ 0.012), but SR units drifted (TV 0.04–0.11, log-Pearson 0.77–0.87, within-gene TV p90 0.10–0.36), as did the consensus (TV 0.04–0.08); 55% of the SR drift was unspliced targets and ~25% multi-isoform spliced transcripts. Anderson runs stopped on the theta-change rule, not the log-posterior rule. Cause: SR units had free transcript-level abundances, which short reads alone do not identify (exonic reads cannot separate spliced from unspliced targets or most isoforms of a gene), and the flat platform effect left these directions without curvature.
+
+Model (`JointEM(pool="design_gene", base=, groups=)`): base units (cell type, LR) carry log abundances $x$ with the design prior (intercept + lineage + cell type); each SR unit is its cell type's LR unit rescaled per gene, $\theta_{SR,t} = R_{g(t)}\,\theta_{LR,t}$ (shared within-gene fractions, free SR gene and pre-mRNA totals). M-step: alternate closed-form $R_g = Z_{SR,g} / \sum_{t \in g} D_{SR,t} e^{x_t}$ and the Lambert-W update of each LR entry with $Z_{LR} + Z_{SR}$ and $D_{LR} + R\,D_{SR}$. With a flat design it reproduces the tied gene model (test).
+
+Convergence (cached PBMC problem): Anderson ×3 3,669 MM steps / 4,773 s, SQUAREM ×3 6,045 / 3,935 s, Anderson ×10 4,222 / 9,592 s, all converged; against a 30,000-step reference, TPM TV ≤ 0.0026 and within-gene TV p90 ≤ 0.0025 for both LR and SR units. The non-identification is gone.
+
+SG-NEx spike-ins (direct cDNA base; PCR-cDNA and SR rescaled per gene): isoform fractions like LR alone on SIRVs (SIRV-4 0.236, SIRV E2 0.224), sequins consensus 0.068 (LR 0.092, joint 0.064; the protocol units are 0.082, so the gain is cross-replicate sharing); abundance best or near best (SD of log ratio SIRV-4 1.447, sequins 1.136, SIRV E2 1.016; log-Pearson sequins 0.946).
+
+Held-out PBMC LR (unsmoothed rescore, fit − LR per molecule, all / within gene): joint_dgene −0.049 / −0.052 at 1%, −0.011 / −0.013 at 5%, −0.0006 / −0.0011 at 20%, like joint_gene, while the LR-only design control gains +0.011 / +0.012 at 1%. Letting Parse SR (other donors) inform within-gene fractions through its transcript-specific fragments still lowers held-out 10x LR prediction.
+
+Summary of the model comparison. Matched samples (SG-NEx): the shared fit is best for isoform fractions (SR's information enters through shared gene totals), design_gene best for abundance. Unmatched donors (PBMC): the best predictor of held-out LR uses no SR (LR-only design prior); every way of letting SR inform isoform fractions, shared, gene-level or transcript-level, lowers it.
+
 ### 2026-11-02 Scaling the joint fit to all molecules
 
 Profile of the 5% fit (20–50M EC positions, L = 215 libraries, K = 21 one-hot units, T ≈ 250k): EM dominates (bias M-steps and weight updates < 3%), and per MM step the dense (L, T) work (π θ products and fresh 430 MB temporaries) cost more than the Rust kernels. Changes and measurements (16 threads, real Kinnex + Parse libraries unless noted):
