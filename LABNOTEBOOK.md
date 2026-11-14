@@ -299,6 +299,8 @@ Held-out PBMC LR (unsmoothed rescore, fit − LR per molecule, all / within gene
 
 Summary of the model comparison. Matched samples (SG-NEx): the shared fit is best for isoform fractions (SR's information enters through shared gene totals), design_gene best for abundance. Unmatched donors (PBMC): the best predictor of held-out LR uses no SR (LR-only design prior); every way of letting SR inform isoform fractions, shared, gene-level or transcript-level, lowers it.
 
+Full-data refit with design_gene as the default joint fit (`joint_celltype.py`; all 123M SR and 888M LR molecules, 671M EC positions): 2 h 48 min on 16 cores, peak 141 GB. Library build 25 min; LR 16 min; LR_design 16.5 min; joint_plain 6.5 min; joint_shared 20 min; joint (design_gene, warm-started abundances and bias models, SQUAREM, 3 inner rounds) 81 min, 8 outer iterations, final run 336 MM steps; all converged. SR poly(dT) unspliced scale correction −0.01 (shared fit 1.59). Unspliced TPM share: SR units median 0.56, LR units 0.11, consensus 0.10. Within-gene isoform fractions of the consensus differ from LR_design by median gene TV 0.015 (0.003–0.041 across cell types) and from LR alone by 0.055 (0.03–0.37): cross-cell-type sharing changes isoform fractions much more than SR does.
+
 ### 2026-11-02 Scaling the joint fit to all molecules
 
 Profile of the 5% fit (20–50M EC positions, L = 215 libraries, K = 21 one-hot units, T ≈ 250k): EM dominates (bias M-steps and weight updates < 3%), and per MM step the dense (L, T) work (π θ products and fresh 430 MB temporaries) cost more than the Rust kernels. Changes and measurements (16 threads, real Kinnex + Parse libraries unless noted):

@@ -24,14 +24,14 @@ Done
 - Primer-specific read-position models; poly(dT) internal-priming scale on unspliced targets.
 - Joint fit on all ~1B molecules (671M EC positions), all stages converge; unspliced share 6–27% per cell type.
 - Findings: Parse coverage is broad for both primers; 10x Kinnex reads often end upstream of GENCODE 3' ends.
-- Default joint fit = design prior across cell types and platforms (intercept + platform + lineage + cell type effects, unit noise); previous default (transcript-level platform pooling) refitted on all data in 3 h 15 min; full refit with the design prior pending faster convergence.
+- Default joint fit = design_gene: design prior across cell types (intercept + lineage + cell type effects, unit noise) on the LR units, SR units = LR units rescaled per gene.
 - Held-out LR evaluation (fixed 10% of LR molecules; training on 1–90%). With eps-smoothing, platform pooling and the design prior appeared to gain a lot (+0.14 and +0.28 nats per molecule at 1%), but rescoring only molecules with positive probability under every fit shows those gains came from the ~2% of held-out molecules that LR alone leaves at zero probability. On the common molecules platform pooling loses to LR alone and only the design prior gains, modestly (+0.010 per molecule at 1%, +0.002 at 20%). An LR-only fit with the same design prior gains as much (+0.011 at 1%), so the gain is cross-cell-type sharing; Parse SR (other donors) adds nothing to held-out 10x LR prediction.
 
 Open
 - SG-NEx spike-ins (done): only the shared fit lets SR improve isoform fractions (SIRV-4 gene TV 0.230 → 0.143); SR's isoform information comes mostly through shared gene totals (length-weighted abundance of within-gene-ambiguous fragments), which decoupled models discard. Default model by design: shared fit for matched samples, design prior for unmatched donors.
 - Same-cell or same-donor SR + LR (e.g. LR-Split-seq, IGVF Parse SR + ONT on the same nuclei) to test SR's isoform contribution in single cell, where gene totals can be shared.
 - design_gene (SR units = LR unit rescaled per gene; design prior on LR units): converges (SQUAREM, ~1 h at smoke scale, agrees with a 30k-step reference); best abundance on SG-NEx spike-ins; on held-out PBMC LR it loses like joint_gene (−0.049 at 1%), while the LR-only design control gains (+0.011).
-- Decide the PBMC default: LR-only design prior (best held-out LR), or design_gene (uses SR for gene and pre-mRNA totals, best spike-in abundance); and whether SR from other donors should inform isoforms at all.
+- PBMC default = design_gene (SR informs gene and pre-mRNA totals; LR_design reported alongside); refitted on all data in 2 h 48 min (16 cores, 141 GB). Consensus isoform fractions are close to LR_design (median within-gene TV 0.015).
 - Learn τ and the design sds (currently chosen by held-out likelihood); possibly separate τ for spliced and unspliced targets.
 - Other held-out designs: whole LR libraries or donors, agreement with the Parse Kinnex same-chemistry library.
 - Sharing across cell types: design-matrix prior implemented (intercept, platform, lineage, cell type); extend to donors and conditions.
@@ -58,6 +58,6 @@ Open
 
 ## Next, in order
 
-1. Choose the PBMC default (LR-only design vs design_gene) and refit all data; same-sample SR + LR single-cell data to test the shared model there; variational inference for uncertainty.
+1. Same-sample SR + LR single-cell data to test whether SR helps isoforms when gene totals can be shared; variational inference for uncertainty.
 2. Baselines on the bulk sets.
 3. Atlas: ENCODE4 bulk LR + Tabula Sapiens SS2 with composition estimation.
