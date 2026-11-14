@@ -23,13 +23,14 @@ Bias models are shared per platform x primer/kit across all of its libraries:
   SR, whose spliced rates are fixed)
   SR poly(dT) scale of internal priming on unspliced targets
 
-Fits: LR (long reads alone, with the read-end model; baseline), joint_plain (no bias models; warm start),
-joint_shared (one abundance vector per cell type, all bias models), joint_tpool (per cell type, SR and
-LR abundances shrunk towards a shared profile on the log scale, sd POOL_TAU) and joint (default: design
-prior across cell types and platforms, log abundances = intercept + platform + lineage + cell type
-(sd DESIGN_CT_SD) effects + unit noise (sd POOL_TAU)).
-Outputs: tpm.tsv.gz (transcripts x fit|unit; joint and joint_tpool have <cell type>@SR, <cell type>@LR
-and a consensus <cell type>), fits.tsv, bias.tsv.
+Fits: LR (long reads alone, with the read-end model; baseline), LR_design (long reads alone with the design
+prior across cell types), joint_plain (no bias models; warm start), joint_shared (one abundance vector per
+cell type, all bias models; warm start) and joint (default, design_gene: the design prior, log abundances
+= intercept + lineage + cell type (sd DESIGN_CT_SD) effects + unit noise (sd POOL_TAU), on each cell type's
+LR unit; its SR unit is the LR unit rescaled per gene, so short reads inform gene and pre-mRNA totals and,
+through transcript-specific fragments, the shared within-gene fractions).
+Outputs: tpm.tsv.gz (transcripts x fit|unit; joint and LR_design have <cell type>@LR (and @SR for joint)
+and a consensus <cell type>, the LR units' design profile), fits.tsv, bias.tsv.
 
 Run: python analyses/parse/joint_celltype.py <sr_series_dirs,comma-separated> <lr_dirs,comma-separated> <ref_dir> <out_dir>
                                              [sr_fraction] [lr_fraction] [min_cells]
@@ -342,22 +343,27 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
     sr_libs, lr_libs, _ = build_libraries(ctx, sr_fraction, lr_fraction)
     units = ctx["units"]
 
-    # LR alone (with truncation) is the baseline; SR alone cannot identify isoforms, so it is not fitted.
-    # joint (default): design prior over (cell type, platform) units, i.e. intercept + platform + lineage +
-    # cell type effects with unit noise (the best model in the held-out LR evaluation); joint_tpool: SR and LR
-    # abundances per cell type shrunk towards a shared profile (warm start); joint_shared: one abundance vector
-    # per cell type.
+    # LR alone (with the read-end model) is the baseline; SR alone cannot identify isoforms, so it is not fitted.
+    # joint (default): design_gene, i.e. the design prior across cell types (intercept + lineage + cell type
+    # effects, unit noise) on each cell type's LR unit, with its SR unit = the LR unit rescaled per gene (shared
+    # within-gene isoform fractions, free SR gene and pre-mRNA totals). LR_design: the same prior on long reads
+    # alone (best on held-out LR). joint_shared: one abundance vector per cell type (warm start).
     both = {**sr_libs, **lr_libs}
     fits = {"LR": (lr_libs, True, False, None, None),
+            "LR_design": (lr_libs, True, False, "design", "LR"),
             "joint_plain": (both, False, False, None, None),
             "joint_shared": (both, True, True, None, "joint_plain"),
-            "joint_tpool": (both, True, True, "transcript", "joint_shared"),
-            "joint": (both, True, True, "design", "joint_tpool")}
-    tpm, summary, bias, done = {}, [], [], {}
+            "joint": (both, True, True, "design_gene", "joint_shared")}
+    tpm, summary, bias, done, outs = {}, [], [], {}, {}
     for fit, (lib_dict, use_models, use_length, pool, init) in fits.items():
         t0 = time.time()
+        warm = outs.get(init) if use_models else None
         out = fit_one(ctx, lib_dict, use_models, use_length, init=done.get(init), pool=pool, pool_tau=POOL_TAU,
-                      design_sd={"cell_type": DESIGN_CT_SD})
+                      design_sd={"cell_type": DESIGN_CT_SD}, init_models=warm,
+                      outer_tol=1e-8 if warm is not None else None,
+                      run_kw={"accelerate": "squarem"} if pool == "design_gene" else None,
+                      em_kw={"design_inner": 3} if pool in ("design", "design_gene") else None)
+        outs[fit] = out if use_models else None
         res, present = out["res"], out["present"]
         done[fit] = (present, res.theta)
         for i, u in enumerate(present):
@@ -367,10 +373,9 @@ def main(sr_dirs, kdir, ref_dir, out_dir, sr_fraction=0.1, lr_fraction=1.0, min_
             labels, prof = out["em"].pooled_profile()
             for j, lab in enumerate(labels):
                 tpm[f"{fit}|{units[lab]}"] = molar_to_tpm(prof[j])
-        if pool == "design":
-            # consensus per cell type: intercept + lineage + cell type effects, platform averaged
-            rows, _, _ = design_units([(ct, "LR") for ct in units], units, {**DESIGN_SD, "cell_type": DESIGN_CT_SD},
-                                      platform=0.5)
+        if pool in ("design", "design_gene"):
+            # consensus per cell type: intercept + lineage + cell type effects of the LR (base) units
+            rows, _, _ = design_units([(ct, "LR") for ct in units], units, {**DESIGN_SD, "cell_type": DESIGN_CT_SD})
             prof = out["em"].design_profile(rows)
             for j, ct in enumerate(units):
                 tpm[f"{fit}|{ct}"] = molar_to_tpm(prof[j])
