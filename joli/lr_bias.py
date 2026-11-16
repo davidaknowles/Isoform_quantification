@@ -692,7 +692,7 @@ def bias_weights(tx, feat, base_c, base_b, trunc=None, length=None, frag=None):
 
 
 def fit_bias(em, trunc=None, length=None, frag=None, n_outer=10, run_kw=None, verbose=False, inner_max_iter=500,
-             init_theta=None, aggregate=True, outer_tol=None):
+             init_theta=None, aggregate=True, outer_tol=None, composition=None, comp_alpha=1.0, comp_iter=20):
     """
     Alternate JointEM runs (warm-started) with bias-model M-steps.
 
@@ -713,6 +713,11 @@ def fit_bias(em, trunc=None, length=None, frag=None, n_outer=10, run_kw=None, ve
         outer_tol : stop the outer loop early (one more bias update and the final run) once an outer
                  iteration raises the log posterior by less than outer_tol * |log posterior|, e.g. when the
                  bias models are warm-started from a converged fit.
+        composition : dict {library index: unit indices} | None -- libraries that are mixtures over those units
+                 (e.g. bulk tissue over its cell types) with mixture weights em.pi[l] estimated: each outer
+                 iteration runs comp_iter MM updates with theta fixed, pi_lk proportional to
+                 (r_lk + comp_alpha - 1) B_l / (N_l theta_k . b_l), r_lk the expected reads from unit k
+                 (E-step of library l only), so pi is in molecule units. comp_alpha: Dirichlet pseudo-count.
         aggregate : evaluate model weights and M-steps once per unique (transcript, features) key
                  (_KeyTables), with the per-position passes in the compiled kernels when available;
                  False evaluates them per position (reference implementation).
@@ -826,6 +831,8 @@ def fit_bias(em, trunc=None, length=None, frag=None, n_outer=10, run_kw=None, ve
                 ks = np.flatnonzero(em.pi[l] > 0)
                 mus.append((em.pi[l, ks] @ res.theta[ks]) * base_b[l])
             model.mstep([res.expected_reads[l] for l in ls], mus)
+        if composition:
+            update_composition(em, res.theta, composition, alpha=comp_alpha, n_iter=comp_iter)
         t1 = time.time()
         apply()
         t2 = time.time()
@@ -846,6 +853,32 @@ def fit_bias(em, trunc=None, length=None, frag=None, n_outer=10, run_kw=None, ve
     if pool:
         pool.shutdown()
     return res
+
+
+def update_composition(em, theta, composition, alpha=1.0, n_iter=20):
+    """
+    MM updates of the mixture weights em.pi[l] of libraries l in `composition` ({l: unit indices}) with
+    theta (full length) fixed: pi_lk <- (r_lk + alpha - 1) B_l / (N_l beta_lk), normalised over the allowed
+    units, where r_lk = pi_lk theta_k . g_l (expected reads from unit k; g_l from the library's E-step),
+    beta_lk = theta_k . b_l and B_l = sum_k pi_lk beta_lk. Each update raises the library's log-likelihood
+    (plus the Dirichlet(alpha) log prior). Weights are in molecule units.
+    """
+    th = em._compact(np.asarray(theta, dtype=np.float64))
+    for l, units in composition.items():
+        units = np.asarray(units)
+        fl = em.libs[l]
+        g = np.empty(em.T)
+        beta = th[units] @ fl.bc
+        for _ in range(n_iter):
+            p = em.pi[l, units]
+            mu = p @ th[units]
+            em._library_estep(l, mu, 1, out=g)
+            r = p * (th[units] @ g)
+            B = p @ beta
+            new = np.maximum(r + alpha - 1.0, 0.0) * B / np.maximum(fl.N * beta, 1e-300)
+            new /= new.sum()
+            em.pi[l] = 0.0
+            em.pi[l, units] = new
 
 
 def _by_model(d):

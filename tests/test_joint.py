@@ -461,3 +461,44 @@ def test_design_gene_converges_fast_and_shares_cell_types():
     e_dg, e_sep = err(res.theta[1::2], truth[1::2]), err(sep.theta, truth[1::2])
     assert res.converged, res.n_iter
     assert e_dg < e_sep, (e_dg, e_sep)
+
+
+def test_composition_recovered_for_bulk_library():
+    """Two cell types with pure libraries and a bulk library mixing them 30:70 in molecules."""
+    from joli.joint import JointEM
+    from joli.lr_bias import update_composition
+    rng = np.random.default_rng(11)
+    T = 300
+    names = [f"t{i}" for i in range(T)]
+    th = rng.dirichlet(np.ones(T) * 0.3, size=2)
+    ecs = [np.array([t]) for t in range(T)]
+    pure = [_ec_library(f"ct{k}", rng, ecs, th[k], 50000, T, names, np.ones(T)) for k in range(2)]
+    mix = 0.3 * th[0] + 0.7 * th[1]
+    bulk = _ec_library("bulk", rng, ecs, mix, 50000, T, names, np.ones(T))
+    pi = np.array([[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]])
+    em = JointEM(pure + [bulk], pi=pi)
+    for _ in range(10):                      # alternate abundances and weights, as fit_bias's outer loop does
+        res = em.run(rel_tol=1e-8, max_iter=20000, init_theta=None if _ == 0 else res.theta)
+        update_composition(em, res.theta, {2: [0, 1]}, n_iter=50)
+    assert abs(em.pi[2, 0] - 0.3) < 0.02, em.pi[2]
+
+
+def test_design_gene_shared_scales_are_common_across_cell_types():
+    import sys, os
+    sys.path.insert(0, os.path.dirname(__file__))
+    from sim_design import design_problem
+    from joli.joint import JointEM
+    libs, X, truth, gene = design_problem(np.random.default_rng(2), K=4, lr_reads=2000)
+    K = X.shape[0]
+    base = [k + 1 if k % 2 == 0 else -1 for k in range(K)]
+    sgroups = [0 if k % 2 == 0 else -1 for k in range(K)]          # all SR units share one scale profile
+    Xb = X[1::2][:, [0] + list(range(2, X.shape[1]))]
+    sd = np.r_[np.inf, np.full(Xb.shape[1] - 1, 0.5)]
+    res = JointEM(libs, units=list(range(K)), pool="design_gene", design=Xb, design_sd=sd, base=base, groups=gene,
+                  scale_groups=sgroups, pool_tau=0.5).run(rel_tol=1e-7, max_iter=20000)
+    th = res.theta
+    G = int(gene.max()) + 1
+    ratio = np.array([np.bincount(gene, th[s], G) / np.bincount(gene, th[s + 1], G) for s in range(0, K, 2)])
+    ratio /= ratio.mean(axis=1, keepdims=True)                     # remove the unit factors a_s
+    assert res.converged
+    np.testing.assert_allclose(ratio, np.broadcast_to(ratio[0], ratio.shape), rtol=1e-4)

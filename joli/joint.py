@@ -172,6 +172,10 @@ class JointEM:
                     the base unit that a scaled unit rescales per group: theta_ut = R_ug theta_bt (shared
                     within-group fractions, free group totals; e.g. SR units on their cell type's LR unit,
                     with genes as groups and unspliced targets as groups of their own).
+        scale_groups : (K,) int | None, for design_gene: scaled units with the same non-negative label share
+                    their group scales up to a unit factor, theta_st = a_s R_jg theta_bt (e.g. one per-gene
+                    platform effect for all SR units), so SR gene expression carries over to the LR units;
+                    -1 (or None) keeps a free R_sg per unit.
         design_mstep : "alternate" | "exact" -- design M-step: design_inner rounds alternating the profile
                     and the per-entry update (default), or per-transcript Newton on the MM surrogate with
                     B profiled out (unit offsets held; fewer MM steps but ~100x costlier per step).
@@ -182,7 +186,7 @@ class JointEM:
 
     def __init__(self, libraries, pi=None, units=None, unit_names=None, backend="auto", threads=None,
                  sort_ecs=True, tie=None, groups=None, tie_iter=1, pool=None, pool_tau=1.0, design=None,
-                 design_sd=None, design_mstep="alternate", design_inner=3, base=None):
+                 design_sd=None, design_mstep="alternate", design_inner=3, base=None, scale_groups=None):
         from . import native
         if backend == "auto":
             backend = "rust" if native.available() else "numpy"
@@ -260,7 +264,9 @@ class JointEM:
             gc, _ = pd.factorize(g)
             self._pooling = {"level": "design_gene", "tau2": tau2, "state": None, "X": X, "lam": lam,
                              "proj": proj, "base": base, "bunits": bunits, "gc": gc.astype(np.int64),
-                             "n_g": int(gc.max()) + 1, "inner": int(design_inner)}
+                             "n_g": int(gc.max()) + 1, "inner": int(design_inner),
+                             "sgroups": (np.full(self.K, -1) if scale_groups is None
+                                         else np.asarray(scale_groups, dtype=np.int64))}
             self.active[:] = self.active.any(axis=0)
             self._activef = self.active.astype(np.float64)
         elif pool == "design":
@@ -577,16 +583,40 @@ class JointEM:
         Zb, Db = Z[bunits].copy(), D[bunits]
         for s, i in scaled:
             Zb[i] += Z[s]
-        R = {}
+        sg = P["sgroups"]
+
+        def scales(xb):
+            """Group scales of the scaled units: free per unit, or a_s R_jg shared within scale groups."""
+            E = {s: agg(D[s] * np.exp(xb[i])) for s, i in scaled}
+            Zg = {s: agg(Z[s]) for s, _ in scaled}
+            R = {}
+            for s, _ in scaled:
+                if sg[s] < 0:
+                    R[s] = np.divide(Zg[s], E[s], out=np.zeros(n_g), where=E[s] > 0)
+            for j in np.unique(sg[[s for s, _ in scaled]]) if scaled else []:
+                if j < 0:
+                    continue
+                mem = [s for s, _ in scaled if sg[s] == j]
+                a = {s: 1.0 for s in mem}
+                for _ in range(5):                         # alternate shared R_jg and unit factors a_s
+                    den = sum(a[s] * E[s] for s in mem)
+                    Rj = np.divide(sum(Zg[s] for s in mem), den, out=np.zeros(n_g), where=den > 0)
+                    for s in mem:
+                        e = Rj @ E[s]
+                        a[s] = Z[s].sum() / e if e > 0 else 0.0
+                for s in mem:
+                    R[s] = a[s] * Rj
+            for s in R:
+                R[s] = R[s] + 1e-9 * R[s].sum() / n_g     # keep scaled units positive in groups without reads
+            return R
+
         for it in range(P["inner"]):
             if it:
                 c = xb.mean(axis=1)
                 m = c[:, None] + P["X"] @ (P["proj"] @ (xb - c[:, None]))
             Dn = Db.copy()
+            R = scales(xb)
             for s, i in scaled:
-                den = agg(D[s] * np.exp(xb[i]))
-                R[s] = np.divide(agg(Z[s]), den, out=np.zeros(n_g), where=den > 0)
-                R[s] += 1e-9 * R[s].sum() / n_g            # keep scaled units positive in groups without reads
                 Dn[i] += R[s][gc] * D[s]
             xb = _newton_lognormal(xb, Zb, Dn, m, P["tau2"], True)
         c = xb.mean(axis=1)
@@ -594,11 +624,9 @@ class JointEM:
         new = np.zeros_like(theta)
         eb = np.exp(xb - xb.max(axis=1, keepdims=True))
         new[bunits] = eb
+        R = scales(xb)
         for s, i in scaled:
-            den = agg(D[s] * np.exp(xb[i]))
-            Rs = np.divide(agg(Z[s]), den, out=np.zeros(n_g), where=den > 0)
-            Rs += 1e-9 * Rs.sum() / n_g
-            new[s] = Rs[gc] * eb[i]
+            new[s] = R[s][gc] * eb[i]
         new *= self._activef
         new /= new.sum(axis=1, keepdims=True)
         return new, lp
