@@ -103,14 +103,15 @@ def library_from_salmon(name, quant_dir, transcript_names=None, use_weights=True
     return Library(name=name, tcc=tcc, b=b, platform=platform, c=c)
 
 
-def read_fragments(path, refs_path, transcript_names, score_frac=1.0, chunksize=20_000_000):
+def read_fragments(path, refs_path, transcript_names, score_frac=1.0, chunksize=20_000_000, fraction=1.0):
     """
     Fragment alignments from salmon --writeMappings, as extracted by
     analyses/sgnex/sam_fragments.awk (columns: fragment, @SQ index, start, length, AS).
 
     Keeps alignments to targets in transcript_names (decoys dropped) with
-    AS >= score_frac * the fragment's best AS. Returns DataFrame with columns
-    read, tx_idx (index into transcript_names), start, flen.
+    AS >= score_frac * the fragment's best AS. With fraction < 1, keeps a fixed pseudo-random subset of
+    fragments (hash of the fragment id) while reading, so memory scales with the kept fragments.
+    Returns DataFrame with columns read, tx_idx (index into transcript_names), start, flen.
     """
     refs = Path(refs_path).read_text().split()
     pos = pd.Series(np.arange(len(transcript_names)), index=transcript_names)
@@ -119,6 +120,9 @@ def read_fragments(path, refs_path, transcript_names, score_frac=1.0, chunksize=
     for ch in pd.read_csv(path, sep="\t", header=None, names=["read", "ref", "start", "flen", "AS"],
                           dtype={"read": np.int64, "ref": np.int64, "start": np.int32, "flen": np.int32, "AS": np.int32},
                           chunksize=chunksize):
+        if fraction < 1.0:
+            h = (ch["read"].to_numpy().astype(np.uint64) * np.uint64(0x9E3779B97F4A7C15)) >> np.uint64(40)
+            ch = ch[(h & np.uint64(0xFFFFFF)) < np.uint64(int(fraction * 2 ** 24))]
         ch["tx_idx"] = ref_to_tx[ch["ref"].to_numpy()]
         parts.append(ch[ch["tx_idx"] >= 0].drop(columns="ref"))
     a = pd.concat(parts, ignore_index=True)

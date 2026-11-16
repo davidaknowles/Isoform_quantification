@@ -46,11 +46,7 @@ def main(d, ref, out, sr_fraction=1.0):
             print(f"missing {g.group}", flush=True)
             continue
         t0 = time.time()
-        frags = read_fragments(gd / "fragments.tsv.gz", gd / "refs.txt", names)
-        if sr_fraction < 1.0:
-            reads = frags["read"].unique()
-            keep = reads[rng.random(len(reads)) < sr_fraction]
-            frags = frags[frags["read"].isin(keep)]
+        frags = read_fragments(gd / "fragments.tsv.gz", gd / "refs.txt", names, fraction=sr_fraction)
         fm = FragmentModel(tx_len)
         sr[g.group] = (library_from_fragments(f"{g.group}|SR", frags, names, tx_len, fm), fm.pf.copy())
         print(f"SR {g.group}: {frags['read'].nunique()} fragments, {len(sr[g.group][0].tcc.ec_counts)} ECs "
