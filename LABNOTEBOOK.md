@@ -301,6 +301,27 @@ Summary of the model comparison. Matched samples (SG-NEx): the shared fit is bes
 
 Full-data refit with design_gene as the default joint fit (`joint_celltype.py`; all 123M SR and 888M LR molecules, 671M EC positions): 2 h 48 min on 16 cores, peak 141 GB. Library build 25 min; LR 16 min; LR_design 16.5 min; joint_plain 6.5 min; joint_shared 20 min; joint (design_gene, warm-started abundances and bias models, SQUAREM, 3 inner rounds) 81 min, 8 outer iterations, final run 336 MM steps; all converged. SR poly(dT) unspliced scale correction −0.01 (shared fit 1.59). Unspliced TPM share: SR units median 0.56, LR units 0.11, consensus 0.10. Within-gene isoform fractions of the consensus differ from LR_design by median gene TV 0.015 (0.003–0.041 across cell types) and from LR alone by 0.055 (0.03–0.37): cross-cell-type sharing changes isoform fractions much more than SR does.
 
+### 2026-11-17 Mouse-brain atlas pilot: Smart-seq2 + bulk PacBio, scored against single-cell long reads
+
+Data: Tabula Muris Senis Smart-seq2 brain cells pooled into 46 groups of region (cortex, hippocampus, striatum, cerebellum) × cell class (neuron, astrocyte, oligodendrocyte, OPC, microglia, endothelial, pericyte) × age (5,722 cells, 25% of fragments); ENCODE mouse bulk PacBio cortex and hippocampus (45 libraries); GENCODE vM37 basic with unspliced targets. Ground truth: Joglekar et al. 2024 P56 ScISOr-Seq2 isoform counts per region × cell class (two replicates M1, M2), mapped to vM37 (57% of UMIs).
+
+Fits: SR_only (one unit per group, FragmentModel), LR_bulk (one unit per tissue, read-end model), and joint (design_gene: 27 region × class base units with a design prior of intercept + region + lineage + class; each SR group is its base unit rescaled per gene, with one SR scale profile shared by all SR units up to a unit factor; each bulk LR library a mixture over its region's base units with composition estimated). Joint fit 642 MM steps, converged, 1 h 49 min (total job 2 h).
+
+Composition estimates are implausible: cortex bulk 71% OPC, 17% neuron; hippocampus 55% astrocyte, 24% neuron. The dominant units are those with the fewest SR cells (cortex OPC 65, hippocampus astrocyte 44), so weakly constrained base units absorb the bulk profile.
+
+Scoring (within-gene isoform fractions, genes with ≥ 20 truth UMIs on ≥ 2 transcripts, same genes for all estimates):
+
+| estimate | median gene TV | specificity | DIU Δψ Pearson (median) | DIU sign agreement |
+|---|---|---|---|---|
+| LR_bulk | 0.104 | 0 | 0 | – |
+| SR_only | 0.180 | 0.025 | 0.578 | 0.784 |
+| joint | 0.160 | 0.014 | 0.639 | 0.811 |
+| joint consensus | 0.136 | 0.013 | 0.674 | 0.829 |
+| truth M1 vs M2 | 0.037 | | | |
+| truth, other classes pooled | 0.040 | | | |
+
+At a typical gene the truth's cell-type differences are as small as replicate noise (0.040 vs 0.037), while every estimate is 0.10–0.18 away: the gene-TV score measures platform and protocol agreement (bulk PacBio vs 10x ScISOr-Seq2 vs Smart-seq2), which the cell-type-agnostic LR_bulk wins. Specificity is the mean, over other classes c', of TV(estimate of c', truth c) − TV(estimate of c, truth c). Differential isoform usage (DIU) restricts to genes where a class's truth differs from the mean of the region's other classes by gene TV ≥ 0.2 (≥ 100 UMIs in each) and correlates Δψ = ψ(class) − mean ψ(other classes) between estimate and truth. On these genes the joint consensus captures cell-type isoform differences best (median r 0.67 vs 0.58 SR alone; LR_bulk has none by construction). The joint base units fail exactly where composition absorbed the bulk (cortex OPC r = −0.03, hippocampus astrocyte r = −0.45); the consensus profile avoids this.
+
 ### 2026-11-02 Scaling the joint fit to all molecules
 
 Profile of the 5% fit (20–50M EC positions, L = 215 libraries, K = 21 one-hot units, T ≈ 250k): EM dominates (bias M-steps and weight updates < 3%), and per MM step the dense (L, T) work (π θ products and fresh 430 MB temporaries) cost more than the Rust kernels. Changes and measurements (16 threads, real Kinnex + Parse libraries unless noted):
