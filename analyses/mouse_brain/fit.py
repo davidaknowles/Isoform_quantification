@@ -10,7 +10,9 @@ Fits:
            (design_gene) with one per-gene SR scale profile shared by all SR units (scale_groups), so SR
            gene expression informs the base units; each bulk LR library is a mixture over its region's base
            units, with composition estimated in the EM (fit_bias composition) or, when a composition table
-           from composition.py (gene-level deconvolution) is given, fixed at it. Base units of regions without
+           from composition.py (gene-level deconvolution) is given, fixed at it as read shares (JointEM
+           mixture="reads"; the deconvolution gives molecule shares, taken as read shares, i.e. similar
+           mean long-read sampling rates across cell classes). Base units of regions without
            bulk LR (striatum, cerebellum) are informed by SR and the prior.
 Outputs: tpm.tsv.gz (transcripts x fit|unit; joint base units "<region>|<class>", SR units
 "<region>|<class>|<age>@SR", consensus profiles "<region>|<class>|consensus"), composition.tsv, fits.tsv.
@@ -117,7 +119,8 @@ def main(pkl, out_dir, ct_sd=1.0, composition_tsv=None):
             pi[l, allowed] = w / w.sum()
     X, sd, cols = design(base_units, ct_sd)
     em = JointEM(libs, pi=pi, pool="design_gene", design=X, design_sd=sd, base=base, groups=z["gene_groups"],
-                 scale_groups=scale_groups, pool_tau=TAU, design_inner=3)
+                 scale_groups=scale_groups, pool_tau=TAU, design_inner=3,
+                 mixture="molecules" if fixed is None else "reads")
     frag = frag_models(sr_keys)
     tm = AnchoredTruncationModel(tx_len, uniform=unspliced)
     trunc = {len(sr_keys) + j: tm for j in range(len(lr_keys))}

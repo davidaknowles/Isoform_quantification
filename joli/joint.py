@@ -176,6 +176,13 @@ class JointEM:
                     their group scales up to a unit factor, theta_st = a_s R_jg theta_bt (e.g. one per-gene
                     platform effect for all SR units), so SR gene expression carries over to the LR units;
                     -1 (or None) keeps a free R_sg per unit.
+        mixture   : "molecules" | "reads" -- meaning of the weights pi_l of libraries drawn from several units.
+                    "molecules": mu_l = pi_l theta, pi_lk the share of the library's molecules from unit k
+                    (needed by fit_bias composition). "reads": P(read) = sum_k pi_lk theta_k.c / theta_k.b,
+                    pi_lk the share of its reads from unit k; each unit is normalised by its own rate, so the
+                    likelihood does not depend on the scale of each theta_k and MM steps stay monotone with
+                    fixed weights (with fixed molecule shares, rescaling a unit's row changes its share of
+                    the mixture).
         design_mstep : "alternate" | "exact" -- design M-step: design_inner rounds alternating the profile
                     and the per-entry update (default), or per-transcript Newton on the MM surrogate with
                     B profiled out (unit offsets held; fewer MM steps but ~100x costlier per step).
@@ -186,7 +193,8 @@ class JointEM:
 
     def __init__(self, libraries, pi=None, units=None, unit_names=None, backend="auto", threads=None,
                  sort_ecs=True, tie=None, groups=None, tie_iter=1, pool=None, pool_tau=1.0, design=None,
-                 design_sd=None, design_mstep="alternate", design_inner=3, base=None, scale_groups=None):
+                 design_sd=None, design_mstep="alternate", design_inner=3, base=None, scale_groups=None,
+                 mixture="molecules"):
         from . import native
         if backend == "auto":
             backend = "rust" if native.available() else "numpy"
@@ -208,6 +216,10 @@ class JointEM:
             pi[np.arange(self.L), units] = 1.0
         self.pi = np.asarray(pi, dtype=np.float64)
         self.K = self.pi.shape[1]
+        if mixture not in ("molecules", "reads"):
+            raise ValueError("mixture must be 'molecules' or 'reads'")
+        self._read_rows = (np.flatnonzero((self.pi > 0).sum(axis=1) > 1) if mixture == "reads"
+                           else np.zeros(0, dtype=np.int64))
         self.unit_names = unit_names or [f"unit{k}" for k in range(self.K)]
         # compact transcript space: transcripts in a nonzero EC of some library
         seen_any = np.zeros(self.T_full, dtype=bool)
@@ -262,12 +274,9 @@ class JointEM:
             lone = g < 0
             g[lone] = g.max() + 1 + np.arange(lone.sum())
             gc, _ = pd.factorize(g)
-            nz = self.pi > 0
-            mix_units = np.flatnonzero((nz & (nz.sum(axis=1) > 1)[:, None]).any(axis=0))   # units in mixture rows
             self._pooling = {"level": "design_gene", "tau2": tau2, "state": None, "X": X, "lam": lam,
                              "proj": proj, "base": base, "bunits": bunits, "gc": gc.astype(np.int64),
                              "n_g": int(gc.max()) + 1, "inner": int(design_inner),
-                             "mixrows": np.flatnonzero(np.isin(bunits, mix_units)),
                              "sgroups": (np.full(self.K, -1) if scale_groups is None
                                          else np.asarray(scale_groups, dtype=np.int64))}
             self.active[:] = self.active.any(axis=0)
@@ -392,13 +401,21 @@ class JointEM:
                 self._Bmat[self._row[l]] = fl.bc
         if self._unit_of is not None:
             return self._estep_onehot(theta, expected_reads)
-        mus = self.pi @ theta                                    # (L, T)
+        r = self._read_rows
+        beta = self._read_beta(theta) if len(r) else None
+        W = self.mix_weights(theta, beta)
+        mus = W @ theta                                          # (L, T)
         G = self._G
         lls = self._library_esteps(lambda l: mus[l])
         B = np.einsum("lt,lt->l", mus, self._Bmat)
         loglik = float(np.sum(lls) - self._N @ np.log(B))
-        Z = theta * (self.pi.T @ G)
-        D = (self.pi * (self._N / B)[:, None]).T @ self._Bmat
+        Z = theta * (W.T @ G)
+        Wd = W * (self._N / B)[:, None]
+        if len(r):
+            # read shares: -sum_k N_lk log(theta_k . b_l), N_lk = expected reads of library l from unit k
+            Nlk = W[r] * (G[r] @ theta.T)
+            Wd[r] = np.divide(Nlk, beta, out=np.zeros_like(beta), where=self.pi[r] > 0)
+        D = Wd.T @ self._Bmat
         R = mus * G if expected_reads else None
         return Z, D, loglik, R
 
@@ -427,6 +444,23 @@ class JointEM:
         R = theta[uo] * G[rows] if expected_reads else None
         return Z, D, loglik, R
 
+    def _read_beta(self, th):
+        """(n_read_rows, K) per-unit rates beta_lk = theta_k . b_l of the read-share mixture rows (compact th)."""
+        return np.stack([self.libs[l].bc for l in self._read_rows]) @ th.T
+
+    def mix_weights(self, th, beta=None):
+        """
+        Effective weights (L, K) with mu_l = w_l theta (compact th): pi, except for read-share mixture rows
+        w_lk = pi_lk / (theta_k . b_l), so that mu_l . b_l = 1.
+        """
+        if not len(self._read_rows):
+            return self.pi
+        r = self._read_rows
+        beta = self._read_beta(th) if beta is None else beta
+        w = self.pi.copy()
+        w[r] = np.divide(self.pi[r], beta, out=np.zeros_like(beta), where=self.pi[r] > 0)
+        return w
+
     def position_counts(self, theta, l):
         """
         Expected reads per (EC, transcript) position of library l,
@@ -435,7 +469,8 @@ class JointEM:
         theta is full length (K, T_full), as returned by run().
         """
         fl = self.libs[l]
-        mu = self.pi[l] @ self._compact(theta)
+        th = self._compact(theta)
+        mu = self.mix_weights(th)[l] @ th
         if self.backend == "rust":
             from . import native
             return native.position_counts(fl.ec_ptr, fl.txc, fl.c, fl.counts, mu,
@@ -455,11 +490,12 @@ class JointEM:
         th = np.asarray(theta, dtype=np.float64)
         th_s = (1.0 - eps) * th + eps / th.shape[1]
         th, th_s = self._compact(th), self._compact(th_s)
+        ws = (self.mix_weights(th), self.mix_weights(th_s))
         ll, n_zero = np.zeros(self.L), np.zeros(self.L)
         for l, fl in enumerate(self.libs):
             out = []
-            for t in (th, th_s):
-                mu = self.pi[l] @ t
+            for t, w in zip((th, th_s), ws):
+                mu = w[l] @ t
                 denom = np.bincount(fl.ec, weights=mu[fl.txc] * fl.c, minlength=fl.n_ec)
                 out.append((denom, mu))
             (d0, _), (d, mu) = out
@@ -481,8 +517,9 @@ class JointEM:
         th = self._compact(np.asarray(theta, dtype=np.float64))
         gc = None if groups is None else np.asarray(groups)[self.cols]
         out = []
+        wm = self.mix_weights(th)
         for l, fl in enumerate(self.libs):
-            mu = self.pi[l] @ th
+            mu = wm[l] @ th
             d = np.bincount(fl.ec, weights=mu[fl.txc] * fl.c, minlength=fl.n_ec)
             with np.errstate(divide="ignore"):
                 ld = np.log(d)
@@ -514,13 +551,14 @@ class JointEM:
         gc = np.asarray(groups)[self.cols]
         G = int(gc.max()) + 1
         ll, used, n_zero = np.zeros(self.L), np.zeros(self.L), np.zeros(self.L)
+        ws = {"raw": self.mix_weights(th0), "smooth": self.mix_weights(th_s)}
         for l, fl in enumerate(self.libs):
             g = gc[fl.txc]
             gmin = np.minimum.reduceat(g, fl.ec_ptr[:-1])
             gmax = np.maximum.reduceat(g, fl.ec_ptr[:-1])
             one = (gmin == gmax) & (gmin >= 0)
             for t, which in ((th0, "raw"), (th_s, "smooth")):
-                mu = self.pi[l] @ t
+                mu = ws[which][l] @ t
                 d = np.bincount(fl.ec, weights=mu[fl.txc] * fl.c, minlength=fl.n_ec)
                 Bg = np.bincount(np.maximum(gc, 0), weights=np.where(gc >= 0, mu * fl.bc, 0.0), minlength=G)
                 if which == "raw":
@@ -622,9 +660,6 @@ class JointEM:
             R = scales(xb)
             Dn = Db + Ind @ (R[:, gc] * D[S])
             xb = _newton_lognormal(xb, Zb, Dn, m, P["tau2"], True)
-            if len(P["mixrows"]):
-                r_ = P["mixrows"]
-                xb[r_] = _lognormal_simplex(xb[r_], Zb[r_], Dn[r_], m[r_], P["tau2"])
         c = xb.mean(axis=1)
         P["state"] = (c, P["proj"] @ (xb - c[:, None]))
         new = np.zeros_like(theta)
@@ -1041,38 +1076,6 @@ def _newton_lognormal(x, Z, Dw, m, tau2, act, n_iter=4):
         np.maximum(w, 1e-300, out=w)
     w = np.where(small, np.exp(np.clip(y, -745.0, 0.0)), w)
     return np.where(act, c - w, x)
-
-
-def _lognormal_simplex(x, Z, Dw, m, tau2, n_iter=50, tol=1e-12):
-    """
-    Rows of x (R, T) maximising sum_t Z x - Dw e^x - (x - m)^2 / (2 tau2) subject to sum_t e^x = 1: the
-    unconstrained maximiser at Dw + lambda_r, with lambda_r (> -min_t Dw) solving sum_t e^x(lambda) = 1
-    by safeguarded Newton on log sum e^x (decreasing in lambda). Rows where no such lambda exists (the
-    bracket fails) are normalised instead. x is the unconstrained solution (lambda = 0).
-    """
-    R = x.shape[0]
-    lam = np.zeros(R)
-    lo = -np.min(Dw, axis=1) * (1.0 - 1e-9)
-    hi = np.full(R, np.inf)
-    out = x.copy()
-    s = np.log(np.exp(x - x.max(axis=1, keepdims=True)).sum(axis=1)) + x.max(axis=1)   # log sum e^x at lambda=0
-    for _ in range(n_iter):
-        hi = np.where(s < 0.0, np.minimum(hi, lam), hi)                 # sum too small: lambda must decrease
-        lo = np.where(s > 0.0, np.maximum(lo, lam), lo)
-        if np.all(np.abs(s) < tol):
-            break
-        e = np.exp(out)
-        ds = -(e * e / ((Dw + lam[:, None]) * e + 1.0 / tau2)).sum(axis=1) / e.sum(axis=1)   # d log S / d lambda
-        step = lam - s / np.minimum(ds, -1e-300)
-        bad = ~((step > lo) & (step < hi))
-        mid = np.where(np.isfinite(hi), 0.5 * (lo + hi), lam + np.abs(lam) + 1.0)
-        lam = np.where(np.abs(s) < tol, lam, np.where(bad, mid, step))
-        out = _newton_lognormal(out, Z, Dw + lam[:, None], m, tau2, True)
-        mx = out.max(axis=1, keepdims=True)
-        s = np.log(np.exp(out - mx).sum(axis=1)) + mx[:, 0]
-    ok = np.abs(s) < 1e-8
-    out[~ok] = out[~ok] - s[~ok, None]                                # fallback: normalise
-    return out
 
 
 def _design_newton(x, Z, D, c, Q, n_newton=8, tol=1e-9, chunk=20000):

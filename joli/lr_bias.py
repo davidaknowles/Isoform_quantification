@@ -776,11 +776,12 @@ def fit_bias(em, trunc=None, length=None, frag=None, n_outer=10, run_kw=None, ve
     def table_counts(theta, ls):
         """Expected reads per local key row of each library in ls (compiled scatter when available)."""
         th = em._compact(theta)
+        W = em.mix_weights(th)
         def one(l):
             idx, uk, _ = tables.loc[l]
             fl = em.libs[l]
             if rust:
-                return native.scatter_counts(fl.ec_ptr, fl.txc, fl.c, fl.counts, em.pi[l] @ th, idx, len(uk))
+                return native.scatter_counts(fl.ec_ptr, fl.txc, fl.c, fl.counts, W[l] @ th, idx, len(uk))
             return np.bincount(idx, weights=em.position_counts(theta, l), minlength=len(uk))
         return pmap(one, ls)
 
@@ -815,8 +816,9 @@ def fit_bias(em, trunc=None, length=None, frag=None, n_outer=10, run_kw=None, ve
                 fls = [em.libs[l] for l in ls]
                 model.mstep(np.concatenate([fl.tx for fl in fls]), np.concatenate([fl.feat for fl in fls]),
                             np.concatenate([em.position_counts(res.theta, l) for l in ls]))
+        W = em.mix_weights(em._compact(res.theta))
         for model, ls in groups_f:
-            mus = [em.pi[l] @ res.theta for l in ls]
+            mus = [W[l] @ res.theta for l in ls]
             if aggregate:
                 tx_u, feat_u, acc, Ns = model_counts(model, ls, res.theta)
                 model.mstep(tx_u, feat_u, acc, mus, Ns)
@@ -829,7 +831,7 @@ def fit_bias(em, trunc=None, length=None, frag=None, n_outer=10, run_kw=None, ve
             mus = []
             for l in ls:
                 ks = np.flatnonzero(em.pi[l] > 0)
-                mus.append((em.pi[l, ks] @ res.theta[ks]) * base_b[l])
+                mus.append((W[l, ks] @ res.theta[ks]) * base_b[l])
             model.mstep([res.expected_reads[l] for l in ls], mus)
         if composition:
             update_composition(em, res.theta, composition, alpha=comp_alpha, n_iter=comp_iter)
@@ -863,6 +865,8 @@ def update_composition(em, theta, composition, alpha=1.0, n_iter=20):
     beta_lk = theta_k . b_l and B_l = sum_k pi_lk beta_lk. Each update raises the library's log-likelihood
     (plus the Dirichlet(alpha) log prior). Weights are in molecule units.
     """
+    if len(em._read_rows):
+        raise NotImplementedError("composition updates use molecule-share weights (JointEM mixture='molecules')")
     th = em._compact(np.asarray(theta, dtype=np.float64))
     for l, units in composition.items():
         units = np.asarray(units)
