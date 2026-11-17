@@ -502,3 +502,45 @@ def test_design_gene_shared_scales_are_common_across_cell_types():
     ratio /= ratio.mean(axis=1, keepdims=True)                     # remove the unit factors a_s
     assert res.converged
     np.testing.assert_allclose(ratio, np.broadcast_to(ratio[0], ratio.shape), rtol=1e-4)
+
+
+def test_lognormal_simplex_rows_sum_to_one_and_stationary():
+    from joli.joint import _lognormal_simplex, _newton_lognormal
+    rng = np.random.default_rng(1)
+    R, T, tau2 = 3, 200, 1.0
+    Z = rng.uniform(0, 20, (R, T)); Dw = rng.uniform(5, 50, (R, T)); m = rng.normal(-5, 1, (R, T))
+    x0 = _newton_lognormal(np.zeros((R, T)), Z, Dw, m, tau2, True)
+    x = _lognormal_simplex(x0, Z, Dw, m, tau2)
+    np.testing.assert_allclose(np.exp(x).sum(axis=1), 1.0, rtol=1e-8)
+    lam = (Z - (x - m) / tau2) / np.exp(x) - Dw                     # KKT: one multiplier per row
+    np.testing.assert_allclose(lam, lam[:, :1] * np.ones((1, T)), rtol=1e-6, atol=1e-6 * np.abs(Dw).max())
+
+
+def test_design_gene_with_mixture_libraries_is_monotone():
+    from joli.joint import JointEM, Library
+    from joli.load_tcc import TCCData, FlatECs
+    rng = np.random.default_rng(3)
+    T, nb = 300, 3
+    names = [f"t{i}" for i in range(T)]
+    groups = rng.integers(0, 90, T)
+    base = [-1] * nb + [0, 1, 2, 0, 1, 2]
+    K = len(base)
+    libs = []
+    for l in range(8):
+        ptr = np.r_[0, np.cumsum(rng.integers(1, 4, 500))]
+        tcc = TCCData(ec_counts=rng.integers(1, 30, 500).astype(float),
+                      ec_transcripts=FlatECs(ptr, rng.integers(0, T, ptr[-1]).astype(np.int32)),
+                      transcript_names=names, total_reads=0, n_targets=T, sample_dir="")
+        libs.append(Library(f"l{l}", tcc, b=rng.uniform(0.5, 2, T), c=FlatECs(ptr, rng.uniform(0.1, 1, ptr[-1]))))
+    pi = np.zeros((8, K))
+    pi[np.arange(6), nb + np.arange(6)] = 1.0
+    pi[6, :nb] = [0.6, 0.3, 0.1]
+    pi[7, :nb] = [0.2, 0.2, 0.6]
+    X = np.c_[np.ones(nb), np.eye(nb)]
+    em = JointEM(libs, pi=pi, pool="design_gene", design=X, design_sd=np.r_[np.inf, np.ones(nb)], base=base,
+                 groups=groups, scale_groups=[-1] * nb + [0] * 6, pool_tau=1.0)
+    for acc in ("squarem", None):
+        r = em.run(max_iter=600, min_iter=600, accelerate=acc, ll_rel_tol=None, rel_tol=0)
+        h = np.array(r.loglik[:-1])
+        assert np.all(np.diff(h) >= -1e-9 * np.abs(h[-1]))
+        assert np.allclose(r.theta.sum(axis=1), 1.0)

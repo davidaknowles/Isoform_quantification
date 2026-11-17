@@ -262,9 +262,12 @@ class JointEM:
             lone = g < 0
             g[lone] = g.max() + 1 + np.arange(lone.sum())
             gc, _ = pd.factorize(g)
+            nz = self.pi > 0
+            mix_units = np.flatnonzero((nz & (nz.sum(axis=1) > 1)[:, None]).any(axis=0))   # units in mixture rows
             self._pooling = {"level": "design_gene", "tau2": tau2, "state": None, "X": X, "lam": lam,
                              "proj": proj, "base": base, "bunits": bunits, "gc": gc.astype(np.int64),
                              "n_g": int(gc.max()) + 1, "inner": int(design_inner),
+                             "mixrows": np.flatnonzero(np.isin(bunits, mix_units)),
                              "sgroups": (np.full(self.K, -1) if scale_groups is None
                                          else np.asarray(scale_groups, dtype=np.int64))}
             self.active[:] = self.active.any(axis=0)
@@ -619,6 +622,9 @@ class JointEM:
             R = scales(xb)
             Dn = Db + Ind @ (R[:, gc] * D[S])
             xb = _newton_lognormal(xb, Zb, Dn, m, P["tau2"], True)
+            if len(P["mixrows"]):
+                r_ = P["mixrows"]
+                xb[r_] = _lognormal_simplex(xb[r_], Zb[r_], Dn[r_], m[r_], P["tau2"])
         c = xb.mean(axis=1)
         P["state"] = (c, P["proj"] @ (xb - c[:, None]))
         new = np.zeros_like(theta)
@@ -931,8 +937,15 @@ class JointEM:
         if accelerate == "anderson":
             theta, history, converged, n_steps = self._anderson(theta, a, max_iter, min_iter, rel_tol, theta_floor,
                                                                 ll_rel_tol, verbose, ll_window=ll_window or 10)
+        fallback = None
         while accelerate != "anderson" and n_steps < max_iter:
             t1, ll0 = self._update(theta, a)
+            if fallback is not None and ll0 < fallback[1]:
+                # the accepted extrapolation lowered the objective below the MM step it replaced: take that step
+                theta = fallback[0]
+                t1, ll0 = self._update(theta, a)
+                n_steps += 1
+            fallback = None
             t2, ll1 = self._update(t1, a)
             n_steps += 2
             new = t2
@@ -955,6 +968,7 @@ class JointEM:
                     n_steps += 1
                     if llp >= ll1:
                         new = t3
+                        fallback = (t2, ll1)
             # a small non-negative gain (a decrease, e.g. after a rejected extrapolation, is not convergence)
             w = ll_window or 1
             ll_stall = (ll_rel_tol is not None and len(history) >= w
@@ -1027,6 +1041,38 @@ def _newton_lognormal(x, Z, Dw, m, tau2, act, n_iter=4):
         np.maximum(w, 1e-300, out=w)
     w = np.where(small, np.exp(np.clip(y, -745.0, 0.0)), w)
     return np.where(act, c - w, x)
+
+
+def _lognormal_simplex(x, Z, Dw, m, tau2, n_iter=50, tol=1e-12):
+    """
+    Rows of x (R, T) maximising sum_t Z x - Dw e^x - (x - m)^2 / (2 tau2) subject to sum_t e^x = 1: the
+    unconstrained maximiser at Dw + lambda_r, with lambda_r (> -min_t Dw) solving sum_t e^x(lambda) = 1
+    by safeguarded Newton on log sum e^x (decreasing in lambda). Rows where no such lambda exists (the
+    bracket fails) are normalised instead. x is the unconstrained solution (lambda = 0).
+    """
+    R = x.shape[0]
+    lam = np.zeros(R)
+    lo = -np.min(Dw, axis=1) * (1.0 - 1e-9)
+    hi = np.full(R, np.inf)
+    out = x.copy()
+    s = np.log(np.exp(x - x.max(axis=1, keepdims=True)).sum(axis=1)) + x.max(axis=1)   # log sum e^x at lambda=0
+    for _ in range(n_iter):
+        hi = np.where(s < 0.0, np.minimum(hi, lam), hi)                 # sum too small: lambda must decrease
+        lo = np.where(s > 0.0, np.maximum(lo, lam), lo)
+        if np.all(np.abs(s) < tol):
+            break
+        e = np.exp(out)
+        ds = -(e * e / ((Dw + lam[:, None]) * e + 1.0 / tau2)).sum(axis=1) / e.sum(axis=1)   # d log S / d lambda
+        step = lam - s / np.minimum(ds, -1e-300)
+        bad = ~((step > lo) & (step < hi))
+        mid = np.where(np.isfinite(hi), 0.5 * (lo + hi), lam + np.abs(lam) + 1.0)
+        lam = np.where(np.abs(s) < tol, lam, np.where(bad, mid, step))
+        out = _newton_lognormal(out, Z, Dw + lam[:, None], m, tau2, True)
+        mx = out.max(axis=1, keepdims=True)
+        s = np.log(np.exp(out - mx).sum(axis=1)) + mx[:, 0]
+    ok = np.abs(s) < 1e-8
+    out[~ok] = out[~ok] - s[~ok, None]                                # fallback: normalise
+    return out
 
 
 def _design_newton(x, Z, D, c, Q, n_newton=8, tol=1e-9, chunk=20000):
