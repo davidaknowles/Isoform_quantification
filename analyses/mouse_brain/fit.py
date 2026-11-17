@@ -9,12 +9,13 @@ Fits:
            + lineage + class effects, unit noise TAU); each SR group is its base unit rescaled per gene
            (design_gene) with one per-gene SR scale profile shared by all SR units (scale_groups), so SR
            gene expression informs the base units; each bulk LR library is a mixture over its region's base
-           units with composition estimated (fit_bias composition). Base units of regions without bulk LR
-           (striatum, cerebellum) are informed by SR and the prior.
+           units, with composition estimated in the EM (fit_bias composition) or, when a composition table
+           from composition.py (gene-level deconvolution) is given, fixed at it. Base units of regions without
+           bulk LR (striatum, cerebellum) are informed by SR and the prior.
 Outputs: tpm.tsv.gz (transcripts x fit|unit; joint base units "<region>|<class>", SR units
 "<region>|<class>|<age>@SR", consensus profiles "<region>|<class>|consensus"), composition.tsv, fits.tsv.
 
-Run: python analyses/mouse_brain/fit.py <libraries.pkl> <out_dir> [ct_sd]
+Run: python analyses/mouse_brain/fit.py <libraries.pkl> <out_dir> [ct_sd] [composition.tsv]
 """
 
 import copy
@@ -49,7 +50,7 @@ def design(base_units, ct_sd):
     return X, sd, cols
 
 
-def main(pkl, out_dir, ct_sd=1.0):
+def main(pkl, out_dir, ct_sd=1.0, composition_tsv=None):
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     z = pd.read_pickle(pkl)
@@ -102,11 +103,18 @@ def main(pkl, out_dir, ct_sd=1.0):
     pi = np.zeros((len(libs), K))
     pi[np.arange(len(sr_keys)), len(base_units) + np.arange(len(sr_keys))] = 1.0
     composition = {}
+    fixed = None
+    if composition_tsv is not None:
+        fixed = pd.read_csv(composition_tsv, sep="\t").set_index("unit")["weight"]
     for j, a in enumerate(lr_keys):
         l = len(sr_keys) + j
         allowed = [i for i, (r, _) in enumerate(base_units) if r == lr_tissue[a]]
-        pi[l, allowed] = 1.0 / len(allowed)
         composition[l] = allowed
+        if fixed is None:
+            pi[l, allowed] = 1.0 / len(allowed)
+        else:
+            w = fixed.reindex([f"{r}|{c}" for r, c in (base_units[i] for i in allowed)]).fillna(0.0).to_numpy()
+            pi[l, allowed] = w / w.sum()
     X, sd, cols = design(base_units, ct_sd)
     em = JointEM(libs, pi=pi, pool="design_gene", design=X, design_sd=sd, base=base, groups=z["gene_groups"],
                  scale_groups=scale_groups, pool_tau=TAU, design_inner=3)
@@ -121,7 +129,7 @@ def main(pkl, out_dir, ct_sd=1.0):
         init[len(base_units) + i] = tpm[f"SR_only|{g}"]
     init = np.maximum(init / init.sum(axis=1, keepdims=True), 1e-10)
     res = fit_bias(em, trunc=trunc, frag=frag, n_outer=8, run_kw={**RUN_KW, "accelerate": "squarem"}, verbose=True,
-                   init_theta=init, composition=composition)
+                   init_theta=init, composition=composition if fixed is None else None)
     for i, u in enumerate(base_units):
         tpm[f"joint|{u[0]}|{u[1]}"] = molar_to_tpm(res.theta[i])
     for i, u in enumerate(sr_units):
@@ -141,4 +149,4 @@ def main(pkl, out_dir, ct_sd=1.0):
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:3], *(float(x) for x in sys.argv[3:4]))
+    main(*sys.argv[1:3], *(float(x) for x in sys.argv[3:4]), *sys.argv[4:5])
