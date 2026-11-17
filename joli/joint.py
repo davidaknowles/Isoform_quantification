@@ -571,7 +571,6 @@ class JointEM:
         """
         P = self._pooling
         base, bunits, gc, n_g = P["base"], P["bunits"], P["gc"], P["n_g"]
-        agg = lambda v: np.bincount(gc, weights=v, minlength=n_g)
         xb = np.log(np.maximum(theta[bunits], 1e-300))
         c = xb.mean(axis=1)
         B = P["proj"] @ (xb - c[:, None])
@@ -580,53 +579,52 @@ class JointEM:
         lp = float(-0.5 * (r * r).sum() / P["tau2"] - 0.5 * (P["lam"] @ (B * B).sum(axis=1)))
         row_of = {int(u): i for i, u in enumerate(bunits)}
         scaled = [(int(s), row_of[int(base[s])]) for s in np.flatnonzero(base >= 0)]
-        Zb, Db = Z[bunits].copy(), D[bunits]
-        for s, i in scaled:
-            Zb[i] += Z[s]
-        sg = P["sgroups"]
+        S = np.array([s for s, _ in scaled], dtype=np.int64)
+        I = np.array([i for _, i in scaled], dtype=np.int64)
+        sg = P["sgroups"][S]
+        flat = (gc[None, :] + n_g * np.arange(len(S))[:, None]).ravel()
+
+        def gsum(W):
+            """Per-gene sums of the rows of W (len(S), T) -> (len(S), n_g)."""
+            return np.bincount(flat, weights=W.ravel(), minlength=len(S) * n_g).reshape(len(S), n_g)
+
+        Ind = np.zeros((len(bunits), len(S)))
+        Ind[I, np.arange(len(S))] = 1.0                    # base row of each scaled unit
+        Zb, Db = Z[bunits] + Ind @ Z[S], D[bunits]
+        Zg = gsum(Z[S])                                    # independent of x: once per M-step
+        Zs = Z[S].sum(axis=1)
 
         def scales(xb):
-            """Group scales of the scaled units: free per unit, or a_s R_jg shared within scale groups."""
-            E = {s: agg(D[s] * np.exp(xb[i])) for s, i in scaled}
-            Zg = {s: agg(Z[s]) for s, _ in scaled}
-            R = {}
-            for s, _ in scaled:
-                if sg[s] < 0:
-                    R[s] = np.divide(Zg[s], E[s], out=np.zeros(n_g), where=E[s] > 0)
-            for j in np.unique(sg[[s for s, _ in scaled]]) if scaled else []:
-                if j < 0:
-                    continue
-                mem = [s for s, _ in scaled if sg[s] == j]
-                a = {s: 1.0 for s in mem}
+            """Group scales (len(S), n_g) of the scaled units: free per unit, or a_s R_jg shared within
+            scale groups."""
+            E = gsum(D[S] * np.exp(xb)[I])
+            R = np.divide(Zg, E, out=np.zeros_like(E), where=E > 0)
+            for j in np.unique(sg[sg >= 0]):
+                mem = np.flatnonzero(sg == j)
+                Em, a = E[mem], np.ones(len(mem))
+                zj = Zg[mem].sum(axis=0)
                 for _ in range(5):                         # alternate shared R_jg and unit factors a_s
-                    den = sum(a[s] * E[s] for s in mem)
-                    Rj = np.divide(sum(Zg[s] for s in mem), den, out=np.zeros(n_g), where=den > 0)
-                    for s in mem:
-                        e = Rj @ E[s]
-                        a[s] = Z[s].sum() / e if e > 0 else 0.0
-                for s in mem:
-                    R[s] = a[s] * Rj
-            for s in R:
-                R[s] = R[s] + 1e-9 * R[s].sum() / n_g     # keep scaled units positive in groups without reads
+                    den = a @ Em
+                    Rj = np.divide(zj, den, out=np.zeros(n_g), where=den > 0)
+                    e = Em @ Rj
+                    a = np.divide(Zs[mem], e, out=np.zeros(len(mem)), where=e > 0)
+                R[mem] = a[:, None] * Rj
+            R += 1e-9 * R.sum(axis=1, keepdims=True) / n_g   # keep scaled units positive in groups without reads
             return R
 
         for it in range(P["inner"]):
             if it:
                 c = xb.mean(axis=1)
                 m = c[:, None] + P["X"] @ (P["proj"] @ (xb - c[:, None]))
-            Dn = Db.copy()
             R = scales(xb)
-            for s, i in scaled:
-                Dn[i] += R[s][gc] * D[s]
+            Dn = Db + Ind @ (R[:, gc] * D[S])
             xb = _newton_lognormal(xb, Zb, Dn, m, P["tau2"], True)
         c = xb.mean(axis=1)
         P["state"] = (c, P["proj"] @ (xb - c[:, None]))
         new = np.zeros_like(theta)
         eb = np.exp(xb - xb.max(axis=1, keepdims=True))
         new[bunits] = eb
-        R = scales(xb)
-        for s, i in scaled:
-            new[s] = R[s][gc] * eb[i]
+        new[S] = scales(xb)[:, gc] * eb[I]
         new *= self._activef
         new /= new.sum(axis=1, keepdims=True)
         return new, lp
