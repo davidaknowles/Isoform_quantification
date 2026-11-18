@@ -379,3 +379,40 @@ def test_key_table_fit_matches_per_position_fit():
     for key, val in out.items():
         for a, b in zip(val, ref):
             np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-7, err_msg=str(key))
+
+
+def test_fragment_gc_model_recovers_gc_bias(tmp_path):
+    from joli.gc import GCIndex, GCTable
+    from joli.lr_bias import FragmentModel
+    rng = np.random.default_rng(0)
+    T, f = 30, 250
+    lens = rng.integers(600, 2500, T)
+    seqs = []
+    for t in range(T):
+        p = rng.uniform(0.3, 0.7)                                   # transcript-level G/C rate, with local blocks
+        blocks = np.repeat(rng.uniform(p - 0.15, p + 0.15, lens[t] // 100 + 1), 100)[:lens[t]]
+        seqs.append(np.where(rng.random(lens[t]) < np.clip(blocks, 0, 1), "G", "A"))
+    fa = tmp_path / "t.fa"
+    fa.write_text("".join(f">t{t}\n{''.join(s)}\n" for t, s in enumerate(seqs)))
+    names = [f"t{t}" for t in range(T)]
+    gct = GCTable(GCIndex(fa, names), lengths=[f], max_pos=10_000)
+    # every fragment of length f, sampled with weight theta_t g_true(GC bin)
+    tx = np.concatenate([np.full(L - f + 1, t) for t, L in enumerate(lens)])
+    st = np.concatenate([np.arange(L - f + 1) for L in lens])
+    gb = gct.fragment_bins(tx, st, np.full(len(tx), f))
+    K = len(gct.edges) - 1
+    g_true = np.exp(-((np.arange(K) - 5.5) / 3.0) ** 2)             # depleted at both G/C extremes
+    theta = rng.dirichlet(np.ones(T))
+    w = theta[tx] * g_true[gb]
+    N = 400_000
+    z = rng.multinomial(N, w / w.sum()).astype(float)
+    fm = FragmentModel(lens, gc=gct)
+    feat = fm.features(st, np.full(len(tx), f), lens[tx], gc_bins=gb)
+    fm.mstep(tx, feat, z, [theta], [N])
+    seen = np.bincount(gb, weights=z, minlength=K) > 1000
+    est = fm.pg[seen] / fm.pg[seen].max()
+    np.testing.assert_allclose(est, g_true[seen] / g_true[seen].max(), rtol=0.05, atol=0.02)
+    # rates equal the G/C-weighted count of start positions at the fitted fld (one length bin)
+    b = fm.rates()
+    expect = np.bincount(tx, weights=fm.pg[gb], minlength=T) * fm.pf[fm._fbin(np.array([f]))[0]]
+    np.testing.assert_allclose(b, expect, rtol=1e-4)

@@ -16,10 +16,12 @@ Fits (one unit each, no prior):
                                            as +trunc with the anchored censored-length model
                                            (AnchoredTruncationModel) in place of independent end profiles
 SR effective lengths are the fixed reference that makes LR length bias identifiable.
+With the option gc, only the fragment-model fits run, each with and without the fragment G/C model
+(FragmentModel(gc=...), "+gc" in the fit name): SRfrag, SRfrag+allLR+anch.
 
 Writes {out_dir}/{cell}_rep{rep}_tpm.tsv.gz, _fits.tsv and _bias.tsv.
 
-Run: python analyses/sgnex/quant.py <cell> <rep> <sgnex_dir> <out_dir>
+Run: python analyses/sgnex/quant.py <cell> <rep> <sgnex_dir> <out_dir> [gc]
 """
 
 import sys
@@ -29,6 +31,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from joli.gc import GCIndex, GCTable
 from joli.joint import JointEM, molar_to_tpm
 from joli.lr_bias import AnchoredTruncationModel, FragmentModel, LengthBias, TruncationModel, fit_bias
 from joli.paf import filter_alignments, library_from_alignments, read_fasta_lengths, read_paf
@@ -38,13 +41,20 @@ from joli.salmon_io import library_from_fragments, library_from_salmon, read_fra
 LR_PROTOCOLS = {"directcDNA": None, "cDNA": None}
 
 
-def main(cell, rep, sgnex_dir, out_dir):
+def main(cell, rep, sgnex_dir, out_dir, mode=None):
     sgnex_dir, out_dir = Path(sgnex_dir), Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = f"{cell}_rep{rep}"
-    names, tx_len = read_fasta_lengths(sgnex_dir / "ref" / "hg38_sequins_SIRV_ERCCs_longSIRVs_cdna.fa")
-    sr = {m: library_from_salmon(f"SR:{m}", sgnex_dir / "salmon" / f"{stem}_Illumina_{m}", transcript_names=names)
-          for m in ["nobias", "bias"]}
+    fasta = sgnex_dir / "ref" / "hg38_sequins_SIRV_ERCCs_longSIRVs_cdna.fa"
+    names, tx_len = read_fasta_lengths(fasta)
+    gc_only = mode == "gc"
+    sr = {} if gc_only else {m: library_from_salmon(f"SR:{m}", sgnex_dir / "salmon" / f"{stem}_Illumina_{m}",
+                                                    transcript_names=names) for m in ["nobias", "bias"]}
+    gct = None
+    if gc_only:
+        t0 = time.time()
+        gct = GCTable(GCIndex(fasta, names))
+        print(f"G/C table ({time.time() - t0:.0f} s)", flush=True)
     # SR fragments (salmon --writeMappings) for the jointly fitted fragment model
     fdir = sgnex_dir / "sr_fragments" / f"{stem}_Illumina"
     srf, frag_init = None, None
@@ -53,6 +63,8 @@ def main(cell, rep, sgnex_dir, out_dir):
         frag_init = FragmentModel(tx_len)
         frags = read_fragments(fdir / "fragments.tsv.gz", fdir / "refs.txt", names)
         srf = library_from_fragments("SR:frag", frags, names, tx_len, frag_init)
+        if gc_only:
+            srf_gc = library_from_fragments("SR:frag", frags, names, tx_len, FragmentModel(tx_len, gc=gct))
         print(f"loaded SR fragments: {frags['read'].nunique()} fragments, {len(frags)} alignments ({time.time() - t0:.0f} s)", flush=True)
         del frags
     lr = {}
@@ -67,15 +79,22 @@ def main(cell, rep, sgnex_dir, out_dir):
         print(f"loaded {proto}: {aln['read'].nunique()} reads ({time.time() - t0:.0f} s)", flush=True)
 
     # (libraries, LR truncation model (False, "trunc", "anch"), length-bias LR?, fragment model for SR:frag?)
-    fits = {"SR:nobias": ([sr["nobias"]], False, False, False), "SR:bias": ([sr["bias"]], False, False, False)}
-    for proto, lib in lr.items():
+    fits = {} if gc_only else {"SR:nobias": ([sr["nobias"]], False, False, False),
+                               "SR:bias": ([sr["bias"]], False, False, False)}
+    for proto, lib in ({} if gc_only else lr).items():
         fits[proto] = ([lib], False, False, False)
         fits[f"{proto}+trunc"] = ([lib], "trunc", False, False)
         fits[f"{proto}+anch"] = ([lib], "anch", False, False)
         fits[f"SR+{proto}+trunc"] = ([sr["bias"], lib], "trunc", False, False)
         fits[f"SR+{proto}+trunc+len"] = ([sr["bias"], lib], "trunc", True, False)
-    fits["SR+allLR+trunc+len"] = ([sr["bias"]] + list(lr.values()), "trunc", True, False)
-    if srf is not None:
+    if not gc_only:
+        fits["SR+allLR+trunc+len"] = ([sr["bias"]] + list(lr.values()), "trunc", True, False)
+    if gc_only:
+        fits["SRfrag"] = ([srf], False, False, True)
+        fits["SRfrag+gc"] = ([srf_gc], False, False, "gc")
+        fits["SRfrag+allLR+anch"] = ([srf] + list(lr.values()), "anch", False, True)
+        fits["SRfrag+gc+allLR+anch"] = ([srf_gc] + list(lr.values()), "anch", False, "gc")
+    elif srf is not None:
         fits["SRfrag"] = ([srf], False, False, True)
         for proto, lib in lr.items():
             for kind in ["trunc", "anch"]:
@@ -93,7 +112,7 @@ def main(cell, rep, sgnex_dir, out_dir):
         length = {l: LengthBias(tx_len) for l in lr_idx} if do_len else {}
         frag = {}
         if do_frag:
-            fm = FragmentModel(tx_len)
+            fm = FragmentModel(tx_len, gc=gct if do_frag == "gc" else None)
             fm.pf = frag_init.pf.copy()
             frag = {l: fm for l, lib in enumerate(libs) if lib.name == "SR:frag"}
         if trunc or length or frag:
@@ -107,6 +126,8 @@ def main(cell, rep, sgnex_dir, out_dir):
         for m in {id(m): m for m in frag.values()}.values():
             bias.append(pd.DataFrame({"fit": fit, "library": "SR:frag", "kind": "fld", "x": m.fe[:-1], "value": m.pf}))
             bias.append(pd.DataFrame({"fit": fit, "library": "SR:frag", "kind": "sr_position", "x": m.re[:-1], "value": m.pq}))
+            if m.gc is not None:
+                bias.append(pd.DataFrame({"fit": fit, "library": "SR:frag", "kind": "gc", "x": m.gc.edges[:-1], "value": m.pg}))
         for l, m in trunc.items():
             if isinstance(m, AnchoredTruncationModel):
                 p = m.profiles()
@@ -129,4 +150,4 @@ def main(cell, rep, sgnex_dir, out_dir):
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:5])
+    main(*sys.argv[1:6])

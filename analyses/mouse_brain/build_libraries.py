@@ -41,7 +41,7 @@ def main(d, ref, out, sr_fraction=1.0):
     groups = pd.read_csv(d / "sr" / "groups.tsv", sep="\t")
     sr = {}
     for g in groups.itertuples():
-        gd = d / "sr" / g.group.replace("|", "_")
+        gd = d / "sr" / g.group.translate(str.maketrans("|/ ", "___"))
         if not (gd / "fragments.tsv.gz").exists():
             print(f"missing {g.group}", flush=True)
             continue

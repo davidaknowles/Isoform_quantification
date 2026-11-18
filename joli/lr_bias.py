@@ -421,13 +421,19 @@ class FragmentModel:
     and b is the effective length under fld (approximated at bin midpoints). A
     uniform q and salmon's fld give salmon's model without bias correction.
 
+    Optional G/C model (gc: joli.gc.GCTable): c is multiplied by g(k), k the G/C bin of the fragment, and
+    b_t = sum_j p_j sum_s g(GC(t, s, m_j)) over start positions s, from the table's share of positions per
+    G/C bin (computed at a few fragment lengths; each fld bin uses the nearest). The M-step alternates the
+    fld fixed point with the analogous one for g, p and g each maximising the expected log-likelihood with
+    the other fixed. Features gain a third column, the G/C bin (features(..., gc_bins=...)).
+
     M-step given expected reads z per alignment: q is the weighted histogram of u;
     fld maximises sum_j A_j log p_j - sum_l N_l log sum_j p_j K_lj with
     K_lj = sum_t mu_lt (L_t - m_j + 1)_+ (b depends on fld), solved by the fixed
     point p_j = A_j / sum_l N_l K_lj / B_l.
     """
 
-    def __init__(self, tx_len, fl_edges=FL_EDGES, rel_edges=FRAG_REL_EDGES):
+    def __init__(self, tx_len, fl_edges=FL_EDGES, rel_edges=FRAG_REL_EDGES, gc=None):
         self.tx_len = np.asarray(tx_len, dtype=np.float64)
         self.fe, self.re = np.asarray(fl_edges, dtype=np.float64), np.asarray(rel_edges, dtype=np.float64)
         self.fw, self.rw = np.diff(self.fe), np.diff(self.re)
@@ -435,6 +441,21 @@ class FragmentModel:
         self.pf = np.full(len(self.fw), 1.0 / len(self.fw))
         self.pq = np.full(len(self.rw), 1.0 / len(self.rw))
         self.O = np.maximum(self.tx_len[:, None] - self.fmid[None, :] + 1.0, 0.0)   # (T, J) start positions
+        self.gc = gc
+        if gc is not None:
+            if gc.H.shape[0] != len(self.tx_len):
+                raise ValueError("GC table and tx_len cover different targets")
+            self.gmap = np.argmin(np.abs(self.fmid[:, None] - gc.lengths[None, :]), axis=1)   # fld bin -> table length
+            K = gc.H.shape[2]
+            self.hbar = gc.H.mean(axis=(0, 1)).astype(np.float64)
+            self.pg = np.ones(K) / (np.ones(K) @ self.hbar)
+
+    def _o_eff(self):
+        """(T, J) G/C-weighted start positions, O_tj sum_k H_t,c(j),k g_k (O without the G/C model)."""
+        if self.gc is None:
+            return self.O
+        Hg = self.gc.H @ self.pg.astype(np.float32)               # (T, C)
+        return self.O * Hg[:, self.gmap]
 
     def init_lengths(self, flen, pseudo=1.0):
         """Start fld at the histogram of fragment lengths (e.g. of uniquely aligned fragments)."""
@@ -444,37 +465,64 @@ class FragmentModel:
     def _fbin(self, flen):
         return np.clip(np.searchsorted(self.fe, np.asarray(flen, dtype=np.float64), side="right") - 1, 0, len(self.fw) - 1)
 
-    def features(self, start, flen, tlen):
-        """(n, 2): fragment-length bin and relative-start bin."""
+    def features(self, start, flen, tlen, gc_bins=None):
+        """(n, 2): fragment-length bin and relative-start bin; (n, 3) with the G/C bin under the G/C model."""
         start, flen, tlen = (np.asarray(x, dtype=np.float64) for x in (start, flen, tlen))
         u = np.clip(start / np.maximum(tlen - flen, 1.0), 0.0, 1.0)
         ub = np.clip(np.searchsorted(self.re, u, side="right") - 1, 0, len(self.rw) - 1)
-        return np.column_stack([self._fbin(flen), ub])
+        cols = [self._fbin(flen), ub]
+        if self.gc is not None:
+            if gc_bins is None:
+                raise ValueError("FragmentModel with a G/C model needs gc_bins")
+            cols.append(np.asarray(gc_bins))
+        return np.column_stack(cols)
 
     def weights(self, tx, feat):
         fb, ub = feat[:, 0], feat[:, 1]
-        return (self.pf[fb] / self.fw[fb]) * (self.pq[ub] / self.rw[ub])
+        w = (self.pf[fb] / self.fw[fb]) * (self.pq[ub] / self.rw[ub])
+        if self.gc is not None:
+            w = w * self.pg[feat[:, 2]]
+        return w
 
     def rates(self):
-        return np.maximum(self.O @ self.pf, 1e-12)
+        return np.maximum(self._o_eff() @ self.pf, 1e-12)
 
-    def mstep(self, tx, feat, z, mus, Ns, n_iter=200, tol=1e-10, pseudo=1e-3):
+    def mstep(self, tx, feat, z, mus, Ns, n_iter=200, tol=1e-10, pseudo=1e-3, n_alt=5):
         """z (n,) expected reads per alignment; mus, Ns per library sharing the model (molar mixtures, read totals)."""
         q = np.bincount(feat[:, 1], weights=z, minlength=len(self.rw)) + pseudo
         self.pq = q / q.sum()
         A = np.bincount(feat[:, 0], weights=z, minlength=len(self.fw)) + pseudo
-        K = np.stack([m @ self.O for m in mus])               # (L, J)
         Ns = np.asarray(Ns, dtype=np.float64)
-        p = self.pf.copy()
-        for _ in range(n_iter):
-            B = K @ p
-            new = A / np.maximum((Ns / B) @ K, 1e-300)
-            new /= new.sum()
-            done = np.abs(new - p).max() < tol
-            p = new
-            if done:
+        Ag = None if self.gc is None else np.bincount(feat[:, 2], weights=z, minlength=len(self.pg)) + pseudo
+        for _ in range(n_alt if self.gc is not None else 1):
+            K = np.stack([m @ self._o_eff() for m in mus])    # (L, J)
+            self.pf = _ratio_fixed_point(A, K, Ns, self.pf, n_iter, tol)
+            if self.gc is None:
                 break
-        self.pf = p
+            # b_t = sum_k g_k M_tk, M_tk = sum_c (sum_{j in c} p_j O_tj) H_tck
+            C = self.gc.H.shape[1]
+            P = np.zeros((len(self.tx_len), C))
+            np.add.at(P.T, self.gmap, (self.O * self.pf).T)
+            M = np.einsum("tc,tck->tk", P, self.gc.H)
+            Kg = np.stack([m @ M for m in mus])               # (L, K)
+            g = _ratio_fixed_point(Ag, Kg, Ns, self.pg / self.pg.sum(), n_iter, tol)
+            self.pg = g / (g @ self.hbar)
+
+
+def _ratio_fixed_point(A, K, Ns, p0, n_iter, tol):
+    """p on the simplex maximising A . log p - sum_l N_l log(K_l . p): p_j = A_j / sum_l (N_l / B_l) K_lj."""
+    p = np.where(K.sum(axis=0) > 0, p0, 0.0)
+    p = p / p.sum()
+    for _ in range(n_iter):
+        B = K @ p
+        den = (Ns / B) @ K
+        new = np.divide(A, den, out=np.zeros_like(A), where=den > 0)   # bins with no possible positions: 0
+        new /= new.sum()
+        done = np.abs(new - p).max() < tol
+        p = new
+        if done:
+            break
+    return p
 
 
 class LengthBias:

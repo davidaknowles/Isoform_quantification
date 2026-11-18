@@ -134,12 +134,15 @@ def read_fragments(path, refs_path, transcript_names, score_frac=1.0, chunksize=
 def library_from_fragments(name, frags, transcript_names, tx_len, model):
     """
     Short-read Library from read_fragments output with a FragmentModel's
-    features (fragment-length and relative-start bins) in the EC keys; the
+    features (fragment-length and relative-start bins, and the G/C bin under its G/C model) in the EC keys; the
     model's fld starts at the fragment lengths of single-alignment fragments.
     """
     from .paf import library_from_alignments
     tlen = np.asarray(tx_len)[frags["tx_idx"].to_numpy()]
-    feat = model.features(frags["start"], frags["flen"], tlen)
+    gc_bins = None
+    if getattr(model, "gc", None) is not None:
+        gc_bins = model.gc.fragment_bins(frags["tx_idx"].to_numpy(), frags["start"].to_numpy(), frags["flen"].to_numpy())
+    feat = model.features(frags["start"], frags["flen"], tlen, gc_bins=gc_bins)
     single = ~frags["read"].duplicated(keep=False).to_numpy()
     model.init_lengths(frags["flen"].to_numpy()[single])
     return library_from_alignments(name, frags, transcript_names, features=feat, platform="short", b=model.rates())
