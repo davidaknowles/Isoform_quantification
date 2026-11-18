@@ -2,7 +2,7 @@
 
 Joint short-read (SR) + long-read (LR) isoform quantification across many samples: LR gives identifiability, SR gives coverage. Pure transcript-level quantification. Details and results are in [LABNOTEBOOK.md](LABNOTEBOOK.md).
 
-Status as of 2026-11-17.
+Status as of 2026-11-18.
 
 ## 1. Bulk method development (WTC11, SG-NEx, simulations)
 
@@ -43,9 +43,9 @@ Open
 Done
 - Data survey (LABNOTEBOOK.md).
 - Mouse-brain pilot: Tabula Muris Senis Smart-seq2 (46 region × class × age groups) + ENCODE bulk PacBio (cortex, hippocampus) as mixtures over region × class units with composition estimated, design_gene prior; scored against Joglekar 2024 P56 ScISOr-Seq2. On genes with cell-type-specific isoform usage in the truth, the joint consensus tracks Δψ best (median r 0.67 vs 0.58 SR alone).
+- Composition: estimated in the EM it was not identified (cortex 71% OPC; those units became bulk-like). Now fixed by gene-level deconvolution (Allen MOp neurons added to the cortex reference; cortex 73% neuron, hippocampus 61%) as read shares (`JointEM(mixture="reads")`), which keeps design_gene MM monotone; converged in 2.5 h; no joint unit fails against the truth any more.
 
 Open
-- Composition is not identified: bulk weight goes to the base units with the fewest SR cells (cortex 71% OPC), which then become bulk-like. Fix by gene-level deconvolution or a composition prior.
 - Platform/protocol differences dominate absolute isoform-fraction error (every estimate 0.10–0.18 median gene TV from the truth vs 0.04 replicate noise).
 - Tabula Sapiens SS2 + ENCODE4 human bulk LR; Allen human cortex (data use agreement unconfirmed).
 

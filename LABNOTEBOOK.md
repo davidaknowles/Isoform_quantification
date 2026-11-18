@@ -322,6 +322,25 @@ Scoring (within-gene isoform fractions, genes with ≥ 20 truth UMIs on ≥ 2 tr
 
 At a typical gene the truth's cell-type differences are as small as replicate noise (0.040 vs 0.037), while every estimate is 0.10–0.18 away: the gene-TV score measures platform and protocol agreement (bulk PacBio vs 10x ScISOr-Seq2 vs Smart-seq2), which the cell-type-agnostic LR_bulk wins. Specificity is the mean, over other classes c', of TV(estimate of c', truth c) − TV(estimate of c, truth c). Differential isoform usage (DIU) restricts to genes where a class's truth differs from the mean of the region's other classes by gene TV ≥ 0.2 (≥ 100 UMIs in each) and correlates Δψ = ψ(class) − mean ψ(other classes) between estimate and truth. On these genes the joint consensus captures cell-type isoform differences best (median r 0.67 vs 0.58 SR alone; LR_bulk has none by construction). The joint base units fail exactly where composition absorbed the bulk (cortex OPC r = −0.03, hippocampus astrocyte r = −0.45); the consensus profile avoids this.
 
+### 2026-11-18 Mouse-brain pilot: deconvolved composition, read-share mixtures, monotone design_gene fits
+
+Composition by gene-level deconvolution (`joli/deconv.py`: multinomial mixture weights fitted by EM on gene counts, the joint model's mixture likelihood aggregated to genes; `analyses/mouse_brain/composition.py`). Bulk profile: LR_bulk molar fractions summed per gene (spliced targets). References: SR_only region × class profiles (mean over ages); for cortex also Allen MOp SMART-seq glutamatergic and GABAergic neurons (exon reads per class divided by median spliced transcript length), because the one Tabula Muris Senis cortex neuron group (50 cells) expresses little Slc17a7 (12 TPM against 443 in bulk cortex) and with TMS references alone cortex came out ~50% OPC. Result: cortex 73% neuron (66% glutamatergic, 7% GABAergic), 9% astrocyte, 8% OPC, 8% oligodendrocyte; hippocampus 61% neuron, 12% OPC, 11% oligodendrocyte, 11% microglia.
+
+Convergence. With the composition fixed (molecule shares), the joint fit hit 20,000 MM steps without converging and the reported log-likelihood fell between outer iterations. Instrumenting each run showed bias M-steps always raise the posterior and the 1e-10 restart floor costs ~2e5, but ~30% of MM iterates lowered it (up to 1.5e6 per step). Cause: the design_gene M-step maximises the surrogate over unnormalised base-unit rows and then normalises; for one-hot libraries this is harmless (scale invariance), but with fixed molecule shares rescaling a unit changes its share of the mixture. A sum-to-one constrained solve per base row (Lagrange multiplier) failed: for 11 of 14 mixture rows the unconstrained solution summed to ~0.89 and the multiplier lies beyond −min D, where the per-entry maximiser stops existing. That is a model problem: with molecule shares fixed, a unit whose profile attracts fewer reads than its share can only comply by moving mass to rarely sampled transcripts. Fix: read-share mixtures (`JointEM(mixture="reads")`), P(read) = Σ_k w_k θ_k·c / θ_k·b with w_k the share of the library's reads from unit k; each unit is normalised by its own rate, the likelihood is invariant to each unit's scale, and plain normalisation keeps MM monotone. E-step: μ_l = Σ_k (w_k/β_lk) θ_k with β_lk = θ_k·b_l, D_k = N_lk b_l / β_lk with N_lk the expected reads from unit k. SQUAREM also falls back to the plain MM step when an accepted extrapolation lowers the objective. Molecule shares remain the default and are needed for composition estimation.
+
+Fixed composition with read shares: no decreasing iterate after the first step (whose start, SR_only and LR_bulk profiles, is off the design_gene manifold), final run converged in 1,638 steps, 2 h 28 min in all (16 cores, 62 GB). Against Joglekar (same scores as above):
+
+| estimate | median gene TV | specificity | DIU Δψ Pearson (median) | DIU sign agreement |
+|---|---|---|---|---|
+| LR_bulk | 0.104 | 0 | 0 | – |
+| SR_only | 0.180 | 0.024 | 0.578 | 0.784 |
+| joint (composition from EM) | 0.160 | 0.014 | 0.639 | 0.811 |
+| joint (deconvolved, read shares) | 0.157 | 0.012 | 0.631 | 0.806 |
+| joint consensus (EM) | 0.136 | 0.013 | 0.674 | 0.829 |
+| joint consensus (deconvolved) | 0.142 | 0.008 | 0.657 | 0.819 |
+
+The base units that absorbed the bulk profile under EM composition recover (DIU r cortex OPC −0.03 → 0.53, hippocampus astrocyte −0.45 → 0.19), so every joint unit is now at least close to SR alone; medians change little, and the consensus profile, which had already avoided the failures, is slightly worse.
+
 ### 2026-11-02 Scaling the joint fit to all molecules
 
 Profile of the 5% fit (20–50M EC positions, L = 215 libraries, K = 21 one-hot units, T ≈ 250k): EM dominates (bias M-steps and weight updates < 3%), and per MM step the dense (L, T) work (π θ products and fresh 430 MB temporaries) cost more than the Rust kernels. Changes and measurements (16 threads, real Kinnex + Parse libraries unless noted):
