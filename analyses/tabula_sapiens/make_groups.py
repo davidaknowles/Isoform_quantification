@@ -3,15 +3,15 @@ Inputs for the Tabula Sapiens atlas pilot: Smart-seq2 pseudobulk groups and the 
 
 Short reads: Tabula Sapiens v1 Smart-seq2 cells of the chosen tissues (one donor each: muscle TSP4, heart
 TSP12), grouped by tissue x cell class; cell ontology classes are merged into classes (CLASS) and groups need
-at least MIN_CELLS cells, with at most MAX_CELLS sampled (fixed seed). Each cell's read pair is located in the
-S3 listing of its donor's Smart-seq2 fastqs (<cell_id>_R1/_R2.fastq.gz). Columns follow the mouse-brain
-pilot so its library and fit scripts apply: region = tissue, cell_class, age = donor.
+at least MIN_CELLS cells, with at most MAX_CELLS sampled (fixed seed). Each cell's reads are its Tabula Sapiens
+v1 genome alignment (<bam_dir>/Pilot<n>/<cell_id>.homo.gencode.v30.ERCC.chrM.Aligned.out.sorted.bam). Columns
+follow the mouse-brain pilot so its SR, library and fit scripts apply: region = tissue, cell_class, age = donor.
 
 Long reads: ENCODE4 PacBio fastqs of the same tissues (psoas muscle; heart chambers and septum).
 
-Writes <out_dir>/sr/groups.tsv, sr/cells.tsv (group, cell, r1 key, r2 key) and lr/files.tsv.
+Writes <out_dir>/sr/groups.tsv, sr/cells.tsv (group, cell, BAM) and lr/files.tsv.
 
-Run: python analyses/tabula_sapiens/make_groups.py <TSP1_TSP15_metadata.csv> <encode_dir> <out_dir> <s3_listing>...
+Run: python analyses/tabula_sapiens/make_groups.py <TSP1_TSP15_metadata.csv> <encode_dir> <out_dir> <bam_dir>
 """
 
 import sys
@@ -39,20 +39,21 @@ HEART_TERMS = ("heart", "cardiac", "ventricle", "atrium", "myocardium")
 MIN_CELLS, MAX_CELLS = 10, 300
 
 
-def main(meta, encode_dir, out_dir, *listings):
+BAM_SUFFIX = ".homo.gencode.v30.ERCC.chrM.Aligned.out.sorted.bam"
+
+
+def main(meta, encode_dir, out_dir, bam_dir):
     out = Path(out_dir)
     (out / "sr").mkdir(parents=True, exist_ok=True)
     (out / "lr").mkdir(parents=True, exist_ok=True)
-    keys = pd.concat([pd.read_csv(f, sep=r"\s+", header=None, usecols=[3], names=["key"]) for f in listings])["key"]
-    by_name = pd.Series(keys.to_numpy(), index=keys.str.rsplit("/", n=1).str[1])
     m = pd.read_csv(meta, low_memory=False)
     s = m[(m.method == "smartseq2") & m.tissue.isin(list(TISSUES)) & (m.donor == m.tissue.map(TISSUES))].copy()
     s["cell_class"] = s.cell_ontology_class.map(CLASS)
     s = s.dropna(subset=["cell_class"])
-    s["r1"] = by_name.reindex(s.cell_id + "_R1.fastq.gz").to_numpy()
-    s["r2"] = by_name.reindex(s.cell_id + "_R2.fastq.gz").to_numpy()
-    print(f"{len(s)} cells, {s.r1.notna().sum()} with fastqs on S3")
-    s = s.dropna(subset=["r1", "r2"])
+    s["bam"] = [str(Path(bam_dir) / f"Pilot{d[3:]}" / f"{c}{BAM_SUFFIX}") for d, c in zip(s.donor, s.cell_id)]
+    on_disk = np.array([Path(b).exists() for b in s.bam])
+    print(f"{len(s)} cells, {on_disk.sum()} with BAMs")
+    s = s[on_disk]
     s["group"] = s.tissue + "|" + s.cell_class + "|" + s.donor
     rng = np.random.default_rng(0)
     keep = [d.iloc[rng.permutation(len(d))[:MAX_CELLS]] for _, d in s.groupby("group") if len(d) >= MIN_CELLS]
@@ -60,7 +61,7 @@ def main(meta, encode_dir, out_dir, *listings):
     groups = cells.groupby("group").agg(region=("tissue", "first"), cell_class=("cell_class", "first"),
                                         age=("donor", "first"), n_cells=("cell_id", "size")).reset_index()
     groups.to_csv(out / "sr" / "groups.tsv", sep="\t", index=False)
-    cells[["group", "cell_id", "r1", "r2"]].to_csv(out / "sr" / "cells.tsv", sep="\t", index=False)
+    cells[["group", "cell_id", "bam"]].to_csv(out / "sr" / "cells.tsv", sep="\t", index=False)
     print(groups.to_string(index=False))
     print(f"{len(groups)} groups, {len(cells)} cells")
 
@@ -78,4 +79,4 @@ def main(meta, encode_dir, out_dir, *listings):
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:4], *sys.argv[4:])
+    main(*sys.argv[1:5])

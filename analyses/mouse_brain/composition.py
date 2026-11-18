@@ -10,7 +10,7 @@ neurons). Neuron components are summed into the neuron class. Weights are fracti
 
 Writes <out.tsv>: tissue, unit (region|class), weight; and component-level weights to <out>.components.tsv.
 
-Run: python analyses/mouse_brain/composition.py <fit_dir> <ref_dir> <allen_cells_dir> <out.tsv>
+Run: python analyses/mouse_brain/composition.py <fit_dir> <ref_dir> <allen_cells_dir | -> <out.tsv>
 """
 
 import re
@@ -46,16 +46,8 @@ def gtf_genes(gtf):
     return pd.Series(names), glen
 
 
-def main(fit_dir, ref_dir, allen_dir, out):
-    names, glen = gtf_genes(Path(ref_dir) / "basic.gtf")
-    tpm = pd.read_csv(Path(fit_dir) / "tpm.tsv.gz", sep="\t", index_col=0,
-                      usecols=lambda c: c == "Unnamed: 0" or c.startswith(("SR_only|", "LR_bulk|")))
-    tpm = tpm[~tpm.index.str.endswith("-U")]
-    t2g = pd.read_csv(Path(ref_dir) / "t2g.tsv", sep="\t", header=None, index_col=0)[1]
-    sym = names.reindex(t2g.reindex(tpm.index)).to_numpy()
-    G = tpm[pd.notna(sym)].groupby(sym[pd.notna(sym)]).sum()               # gene symbol x fit column
-
-    d = Path(allen_dir)
+def allen_profiles(d, names, glen):
+    """Allen MOp glutamatergic and GABAergic neuron gene profiles on a molecule scale (symbol index)."""
     ann = pd.read_csv(d / "cluster.annotation.csv").set_index("cluster_id")
     mem = pd.read_csv(d / "cluster.membership.csv", index_col=0)["x"]
     cls = ann["class_label"].reindex(mem.to_numpy()).set_axis(mem.index)
@@ -65,16 +57,30 @@ def main(fit_dir, ref_dir, allen_dir, out):
     for c, label in [("Glutamatergic", "neuron:Allen_glutamatergic"), ("GABAergic", "neuron:Allen_GABAergic")]:
         cells = cls.index[cls == c].intersection(counts.columns)
         allen[label] = counts[cells].sum(axis=1) / sym_len.reindex(counts.index)
-    allen = pd.DataFrame(allen)
+    return pd.DataFrame(allen)
+
+
+def main(fit_dir, ref_dir, allen_dir, out):
+    names, glen = gtf_genes(Path(ref_dir) / "basic.gtf")
+    tpm = pd.read_csv(Path(fit_dir) / "tpm.tsv.gz", sep="\t", index_col=0,
+                      usecols=lambda c: c == "Unnamed: 0" or c.startswith(("SR_only|", "LR_bulk|")))
+    tpm = tpm[~tpm.index.str.endswith("-U")]
+    t2g = pd.read_csv(Path(ref_dir) / "t2g.tsv", sep="\t", header=None, index_col=0)[1]
+    sym = names.reindex(t2g.reindex(tpm.index)).to_numpy()
+    G = tpm[pd.notna(sym)].groupby(sym[pd.notna(sym)]).sum()               # gene symbol x fit column
+
+    allen = pd.DataFrame()
+    if allen_dir != "-":
+        allen = allen_profiles(Path(allen_dir), names, glen)
 
     rows, comp_rows = [], []
     for col in [c for c in G.columns if c.startswith("LR_bulk|")]:
         tissue = col.split("|")[1]
         ref = {}
         for c in sorted({c.split("|")[2] for c in G.columns if c.startswith(f"SR_only|{tissue}|")}):
-            ref[f"{c}:TMS"] = G[[x for x in G.columns if x.startswith(f"SR_only|{tissue}|{c}|")]].mean(axis=1)
+            ref[f"{c}:SR"] = G[[x for x in G.columns if x.startswith(f"SR_only|{tissue}|{c}|")]].mean(axis=1)
         ref = pd.DataFrame(ref)
-        if tissue == "Cortex":
+        if tissue == "Cortex" and len(allen):
             ref = ref.join(allen, how="inner")
         ref = ref.dropna()
         ref = ref[(ref.sum(axis=1) > 0)]
