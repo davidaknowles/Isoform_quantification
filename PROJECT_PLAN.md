@@ -13,7 +13,7 @@ Done
 - Spike-in benchmarks: WTC11 SIRV-4 (read-end model and strict filter help every LR platform), SG-NEx SIRV/sequins (SR fragment model + all LR protocols best on sequins and SIRV E2).
 
 Open
-- Mixed results on SIRV-4 when SR is added; abundance correlation drops in joint fits (SR fragment model needs sequence/GC bias).
+- Mixed results on SIRV-4 when SR is added. SR fragment G/C model implemented (optional): strong, reproducible G/C curve but little change in isoform fractions; salmon's full bias correction does no better. SR isoform error is fragment ambiguity, not bias.
 - Baselines: lr-kallisto, oarfish, IsoQuant, MPAQT, miniQuant.
 - Empirical Bayes prior across samples (variational inference in place of plug-in Dirichlet).
 
@@ -47,7 +47,7 @@ Done
 
 Open
 - Platform/protocol differences dominate absolute isoform-fraction error (every estimate 0.10–0.18 median gene TV from the truth vs 0.04 replicate noise).
-- Tabula Sapiens SS2 + ENCODE4 human bulk LR; Allen human cortex (data use agreement unconfirmed).
+- Tabula Sapiens pilot (muscle TSP4, heart TSP12 Smart-seq2; ENCODE4 psoas and heart PacBio, 19 libraries aligned): groups built, SR reads blocked (S3 objects need credentials; lab access via Karin). Allen human cortex (data use agreement unconfirmed).
 
 ## Engineering
 

@@ -322,6 +322,24 @@ Scoring (within-gene isoform fractions, genes with ≥ 20 truth UMIs on ≥ 2 tr
 
 At a typical gene the truth's cell-type differences are as small as replicate noise (0.040 vs 0.037), while every estimate is 0.10–0.18 away: the gene-TV score measures platform and protocol agreement (bulk PacBio vs 10x ScISOr-Seq2 vs Smart-seq2), which the cell-type-agnostic LR_bulk wins. Specificity is the mean, over other classes c', of TV(estimate of c', truth c) − TV(estimate of c, truth c). Differential isoform usage (DIU) restricts to genes where a class's truth differs from the mean of the region's other classes by gene TV ≥ 0.2 (≥ 100 UMIs in each) and correlates Δψ = ψ(class) − mean ψ(other classes) between estimate and truth. On these genes the joint consensus captures cell-type isoform differences best (median r 0.67 vs 0.58 SR alone; LR_bulk has none by construction). The joint base units fail exactly where composition absorbed the bulk (cortex OPC r = −0.03, hippocampus astrocyte r = −0.45); the consensus profile avoids this.
 
+### 2026-11-18 SR fragment G/C model; short-read bias is not the platform gap
+
+`FragmentModel(gc=GCTable)` (`joli/gc.py`): fragment weight × g(k), k one of 12 G/C bins of the fragment (outer bins < 25% and > 75%); b_t = Σ_j p_j Σ_s g(GC(t, s, m_j)) from per-transcript shares of start positions per G/C bin, computed at 8 fragment lengths (100–700 bp, each fld bin uses the nearest) from ≤ 128 evenly spaced starts, sequences stored as packed G/C bits. The M-step alternates the fld fixed point (with G/C-weighted start counts) and the analogous fixed point for g. Recovers a simulated G/C curve to 5%. Also fixed in the shared fixed point: a fragment-length bin longer than every transcript has an all-zero column and could take all the mass (hidden so far because real references contain long transcripts); such bins now get 0.
+
+SG-NEx spike-ins (mean over replicates, gene TV median of within-gene fractions):
+
+| fit | sequins | SIRV-4 | SIRV E2 |
+|---|---|---|---|
+| SR, salmon no bias | 0.133 | 0.260 | 0.246 |
+| SR, salmon seq + G/C + position bias | 0.122 | 0.253 | 0.293 |
+| SRfrag | 0.136 | 0.237 | 0.287 |
+| SRfrag + G/C | 0.132 | 0.252 | 0.259 |
+| direct cDNA, read-end model | 0.073 | 0.172 | 0.183 |
+| SRfrag + both ONT, read-end model | 0.064 | 0.143 | 0.131 |
+| SRfrag + G/C + both ONT, read-end model | 0.062 | 0.144 | 0.137 |
+
+The fitted G/C curve is strong and reproducible (relative rate 0.06 at < 25% G/C, 1.2 at 50–55%, 0.08–0.15 at > 75%, alike in H9 and HEYA8), but neither it nor salmon's full bias correction changes short-read isoform fractions much; abundance SD of log ratio improves slightly (SIRV-4 1.98 → 1.95). Short-read isoform error (0.13–0.29) reflects fragment ambiguity rather than uncorrected bias, and long reads halve it. The G/C model stays optional (off by default).
+
 ### 2026-11-18 Mouse-brain pilot: deconvolved composition, read-share mixtures, monotone design_gene fits
 
 Composition by gene-level deconvolution (`joli/deconv.py`: multinomial mixture weights fitted by EM on gene counts, the joint model's mixture likelihood aggregated to genes; `analyses/mouse_brain/composition.py`). Bulk profile: LR_bulk molar fractions summed per gene (spliced targets). References: SR_only region × class profiles (mean over ages); for cortex also Allen MOp SMART-seq glutamatergic and GABAergic neurons (exon reads per class divided by median spliced transcript length), because the one Tabula Muris Senis cortex neuron group (50 cells) expresses little Slc17a7 (12 TPM against 443 in bulk cortex) and with TMS references alone cortex came out ~50% OPC. Result: cortex 73% neuron (66% glutamatergic, 7% GABAergic), 9% astrocyte, 8% OPC, 8% oligodendrocyte; hippocampus 61% neuron, 12% OPC, 11% oligodendrocyte, 11% microglia.
