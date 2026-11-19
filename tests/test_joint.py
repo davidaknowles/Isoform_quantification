@@ -590,3 +590,24 @@ def test_concat_libraries_matches_joint_loglik():
     a, bb = np.concatenate(sep.ec_logprob(theta)), one.ec_logprob(theta)[0]
     np.testing.assert_allclose(np.sort(a), np.sort(bb), rtol=1e-12)
     assert one.libs[0].N == sum(l.N for l in sep.libs)
+
+
+def test_design_gene_without_scaled_units_runs():
+    from joli.joint import JointEM, Library
+    from joli.load_tcc import TCCData, FlatECs
+    rng = np.random.default_rng(4)
+    T, nb = 120, 3
+    names = [f"t{i}" for i in range(T)]
+    libs = []
+    for l in range(2):
+        ptr = np.r_[0, np.cumsum(rng.integers(1, 4, 300))]
+        tcc = TCCData(ec_counts=rng.integers(1, 20, 300).astype(float),
+                      ec_transcripts=FlatECs(ptr, rng.integers(0, T, ptr[-1]).astype(np.int32)),
+                      transcript_names=names, total_reads=0, n_targets=T, sample_dir="")
+        libs.append(Library(f"l{l}", tcc, b=rng.uniform(0.5, 2, T)))
+    pi = np.array([[0.5, 0.3, 0.2], [0.2, 0.2, 0.6]])
+    X = np.c_[np.ones(nb), np.eye(nb)]
+    em = JointEM(libs, pi=pi, pool="design_gene", design=X, design_sd=np.r_[np.inf, np.ones(nb)], base=[-1] * nb,
+                 groups=rng.integers(0, 40, T), scale_groups=[-1] * nb, pool_tau=1.0, mixture="reads")
+    r = em.run(max_iter=200)
+    assert np.isfinite(r.loglik[-1]) and np.allclose(r.theta.sum(axis=1), 1.0)

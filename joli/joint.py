@@ -638,6 +638,8 @@ class JointEM:
         def scales(xb):
             """Group scales (len(S), n_g) of the scaled units: free per unit, or a_s R_jg shared within
             scale groups."""
+            if not len(S):
+                return np.zeros((0, n_g))
             E = gsum(D[S] * np.exp(xb)[I])
             R = np.divide(Zg, E, out=np.zeros_like(E), where=E > 0)
             for j in np.unique(sg[sg >= 0]):
