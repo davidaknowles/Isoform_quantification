@@ -220,3 +220,30 @@ def library_from_alignments(name, aln, transcript_names, weight=None, features=N
     if b is None:
         b = np.ones(len(transcript_names))
     return Library(name=name, tcc=tcc, b=b, platform=platform, c=c, feat=feat)
+
+
+def concat_libraries(name, libs):
+    """
+    One Library from libraries of the same targets, platform and rates (e.g. pseudobulk libraries of several
+    cell types pooled into a bulk library): EC lists, features and weights are concatenated; ECs with the same
+    key in several inputs stay separate rows, which leaves the likelihood unchanged.
+    """
+    libs = list(libs)
+    first = libs[0]
+    for l in libs[1:]:
+        if l.platform != first.platform or not np.array_equal(l.b, first.b):
+            raise ValueError("concat_libraries needs the same platform and rates")
+        if (l.feat is None) != (first.feat is None) or (l.c is None) != (first.c is None):
+            raise ValueError("concat_libraries needs the same feature/weight layout")
+
+    def cat(flats):
+        sizes = np.concatenate([np.diff(f.ptr) for f in flats])
+        return FlatECs(np.r_[0, np.cumsum(sizes)], np.concatenate([f.values for f in flats]))
+
+    counts = np.concatenate([np.asarray(l.tcc.ec_counts) for l in libs])
+    tcc = TCCData(ec_counts=counts, ec_transcripts=cat([l.tcc.ec_transcripts for l in libs]),
+                  transcript_names=first.tcc.transcript_names, total_reads=int(counts.sum()),
+                  n_targets=first.tcc.n_targets, sample_dir=name)
+    return Library(name=name, tcc=tcc, b=first.b, platform=first.platform,
+                   c=None if first.c is None else cat([l.c for l in libs]),
+                   feat=None if first.feat is None else cat([l.feat for l in libs]))

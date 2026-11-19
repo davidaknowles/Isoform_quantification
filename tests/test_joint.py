@@ -566,3 +566,27 @@ def test_read_share_mixture_loglik_and_estep():
     r = em.run(max_iter=400, min_iter=400, ll_rel_tol=None, rel_tol=0, accelerate=None)
     h = np.array(r.loglik[:-1])
     assert np.all(np.diff(h) >= -1e-9 * abs(h[-1]))
+
+
+def test_concat_libraries_matches_joint_loglik():
+    from joli.joint import JointEM, Library
+    from joli.load_tcc import TCCData, FlatECs
+    from joli.paf import concat_libraries
+    rng = np.random.default_rng(2)
+    T = 50
+    names = [f"t{i}" for i in range(T)]
+    b = rng.uniform(0.5, 2, T)
+    libs = []
+    for l in range(3):
+        ptr = np.r_[0, np.cumsum(rng.integers(1, 4, 80))]
+        tcc = TCCData(ec_counts=rng.integers(1, 9, 80).astype(float),
+                      ec_transcripts=FlatECs(ptr, rng.integers(0, T, ptr[-1]).astype(np.int32)),
+                      transcript_names=names, total_reads=0, n_targets=T, sample_dir="")
+        libs.append(Library(f"l{l}", tcc, b=b, c=FlatECs(ptr, rng.uniform(0.1, 1, ptr[-1])),
+                            feat=FlatECs(ptr, rng.integers(0, 5, (ptr[-1], 2)))))
+    theta = rng.dirichlet(np.ones(T))[None]
+    sep = JointEM(libs, units=[0, 0, 0])
+    one = JointEM([concat_libraries("bulk", libs)], units=[0])
+    a, bb = np.concatenate(sep.ec_logprob(theta)), one.ec_logprob(theta)[0]
+    np.testing.assert_allclose(np.sort(a), np.sort(bb), rtol=1e-12)
+    assert one.libs[0].N == sum(l.N for l in sep.libs)
