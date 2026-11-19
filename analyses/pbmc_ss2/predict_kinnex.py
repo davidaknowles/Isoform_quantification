@@ -11,13 +11,15 @@ Cell types are merged into classes both data sets cover (CLASS); held-out molecu
 
 Fits:
   LR_bulk      one abundance vector per bulk library, read-end model per kit: no cell-type resolution
+  LR_pooled    one abundance vector for all bulk libraries (no cell-type or library resolution, like the
+               joint fits' profiles, which are shared across libraries)
   joint        base units per class with the design prior (intercept + lineage + class); each Smart-seq2
                group is its class unit rescaled per gene (one shared SR scale profile); each bulk library is
                a mixture over the classes with read shares fixed by gene-level deconvolution (bulk LR gene
                profile against Smart-seq2 gene profiles from single-gene ECs); joint_consensus is the design
                profile of each class
   LR_celltype  the training long reads with their cell labels, one unit per class (the ceiling)
-Optional variants (comma-separated, default joint):
+Optional variants (comma-separated, default joint; "-" for the long-read fits only):
   joint_noSR      the same bulk mixture with deconvolved composition and design prior, without Smart-seq2 reads
   joint_truecomp  as joint with the training molecules' label shares as composition (diagnostic only)
   any of these with suffixes _tau<x> (unit noise sd, default TAU), _csd<y> (class effect sd, default CLASS_SD) and
@@ -151,6 +153,15 @@ def main(kdir, ss2_pkl, ref_dir, out_dir, lr_fraction=0.25, test_fraction=0.1, v
         tpm[f"LR_bulk|{b}"] = molar_to_tpm(res.theta[i])
     lr_bulk_theta = res.theta
 
+    # LR_pooled: one profile for all bulk libraries
+    t0 = time.time()
+    em = JointEM([bulk[b] for b in bulk_keys], units=[0] * len(bulk_keys))
+    trunc, models = kit_models(bulk_keys, kit_of, tx_len, unspliced)
+    res = fit_bias(em, trunc=trunc, n_outer=8, run_kw=RUN_KW, verbose=True)
+    record("LR_pooled", res, t0, len(bulk_keys))
+    fits["LR_pooled"] = ({c: res.theta[0] for c in classes}, models)
+    tpm["LR_pooled"] = molar_to_tpm(res.theta[0])
+
     # LR_celltype (labelled training long reads, the ceiling)
     t0 = time.time()
     keys = sorted(k for k in lr_train if k.split("|")[0] in CLASS and CLASS[k.split("|")[0]] in classes)
@@ -183,7 +194,7 @@ def main(kdir, ss2_pkl, ref_dir, out_dir, lr_fraction=0.25, test_fraction=0.1, v
     # joint variants: Smart-seq2 groups (or none) + bulk long reads
     nb = len(classes)
     truec = {b: np.array([true_comp.get((b, c), 0.0) for c in classes]) for b in bulk_keys}
-    for variant in variants.split(","):
+    for variant in [] if variants == "-" else variants.split(","):
         t0 = time.time()
         kind = re.sub(r"_(tau|csd|lsd)[0-9.]+", "", variant)
         tau = float(re.search(r"_tau([0-9.]+)", variant).group(1)) if "_tau" in variant else TAU
