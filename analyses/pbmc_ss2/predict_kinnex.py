@@ -17,6 +17,9 @@ Fits:
                profile against Smart-seq2 gene profiles from single-gene ECs); joint_consensus is the design
                profile of each class
   LR_celltype  the training long reads with their cell labels, one unit per class (the ceiling)
+Optional variants (comma-separated, default joint):
+  joint_noSR      the same bulk mixture with deconvolved composition and design prior, without Smart-seq2 reads
+  joint_truecomp  as joint with the training molecules' label shares as composition (diagnostic only)
 Composition: deconvolution estimates are reported next to the training molecules' label shares, which are
 not used in fitting.
 
@@ -26,7 +29,7 @@ model for the kit, without smoothing, on ECs with positive probability under eve
 "within_gene" (ECs of one gene, conditioned on the gene). summary.tsv: gain per molecule over LR_bulk.
 
 Run: python analyses/pbmc_ss2/predict_kinnex.py <kinnex_dir> <ss2_libraries.pkl> <ref_dir> <out_dir>
-                                                 [lr_fraction] [test_fraction]
+                                                 [lr_fraction] [test_fraction] [variants]
 """
 
 import sys
@@ -86,7 +89,7 @@ def logprobs(lib, theta, model, genes):
     return em.ec_logprob(theta[None]), em.ec_logprob(theta[None], groups=genes), fl.counts
 
 
-def main(kdir, ss2_pkl, ref_dir, out_dir, lr_fraction=0.25, test_fraction=0.1):
+def main(kdir, ss2_pkl, ref_dir, out_dir, lr_fraction=0.25, test_fraction=0.1, variants="joint"):
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     ref_dir = Path(ref_dir)
@@ -174,37 +177,43 @@ def main(kdir, ss2_pkl, ref_dir, out_dir, lr_fraction=0.25, test_fraction=0.1):
     comp_df.to_csv(out / "composition.tsv", sep="\t", index=False)
     print(comp_df.groupby("class")[["deconvolution", "true"]].mean().round(3).to_string(), flush=True)
 
-    # joint: Smart-seq2 groups + bulk long reads
-    t0 = time.time()
-    nb = len(classes)
-    K = nb + len(sr_keys)
-    base = [-1] * nb + [classes.index(c) for c in sr_class]
-    libs = [z["sr"][g][0] for g in sr_keys] + [bulk[b] for b in bulk_keys]
-    pi = np.zeros((len(libs), K))
-    pi[np.arange(len(sr_keys)), nb + np.arange(len(sr_keys))] = 1.0
-    for j, b in enumerate(bulk_keys):
-        pi[len(sr_keys) + j, :nb] = comp[b] / comp[b].sum()
+    # joint variants: Smart-seq2 groups (or none) + bulk long reads
     X, sd = design(classes)
-    em = JointEM(libs, pi=pi, pool="design_gene", design=X, design_sd=sd, base=base, groups=gene_groups,
-                 scale_groups=[-1] * nb + [0] * len(sr_keys), pool_tau=TAU, design_inner=3, mixture="reads")
-    frag = {}
-    for i, g in enumerate(sr_keys):
-        fm = FragmentModel(tx_len)
-        fm.pf = z["sr"][g][1].copy()
-        frag[i] = fm
-    trunc_b, models = kit_models(bulk_keys, kit_of, tx_len, unspliced)
-    trunc = {len(sr_keys) + j: m for j, m in trunc_b.items()}
-    init = np.tile(lr_bulk_theta.mean(axis=0), (K, 1))
-    init = np.maximum(init / init.sum(axis=1, keepdims=True), 1e-10)
-    res = fit_bias(em, trunc=trunc, frag=frag, n_outer=8, run_kw={**RUN_KW, "accelerate": "squarem"}, verbose=True,
-                   init_theta=init)
-    record("joint", res, t0, len(libs))
-    prof = em.design_profile(X)
-    fits["joint"] = ({c: res.theta[i] for i, c in enumerate(classes)}, models)
-    fits["joint_consensus"] = ({c: prof[i] for i, c in enumerate(classes)}, models)
-    for i, c in enumerate(classes):
-        tpm[f"joint|{c}"] = molar_to_tpm(res.theta[i])
-        tpm[f"joint_consensus|{c}"] = molar_to_tpm(prof[i])
+    nb = len(classes)
+    truec = {b: np.array([true_comp.get((b, c), 0.0) for c in classes]) for b in bulk_keys}
+    for variant in variants.split(","):
+        t0 = time.time()
+        use_sr = variant != "joint_noSR"
+        cmp = truec if variant == "joint_truecomp" else comp
+        keys_sr = sr_keys if use_sr else []
+        cls_sr = sr_class if use_sr else []
+        K = nb + len(keys_sr)
+        base = [-1] * nb + [classes.index(c) for c in cls_sr]
+        libs = [z["sr"][g][0] for g in keys_sr] + [bulk[b] for b in bulk_keys]
+        pi = np.zeros((len(libs), K))
+        pi[np.arange(len(keys_sr)), nb + np.arange(len(keys_sr))] = 1.0
+        for j, b in enumerate(bulk_keys):
+            pi[len(keys_sr) + j, :nb] = cmp[b] / cmp[b].sum()
+        em = JointEM(libs, pi=pi, pool="design_gene", design=X, design_sd=sd, base=base, groups=gene_groups,
+                     scale_groups=[-1] * nb + [0] * len(keys_sr), pool_tau=TAU, design_inner=3, mixture="reads")
+        frag = {}
+        for i, g in enumerate(keys_sr):
+            fm = FragmentModel(tx_len)
+            fm.pf = z["sr"][g][1].copy()
+            frag[i] = fm
+        trunc_b, models = kit_models(bulk_keys, kit_of, tx_len, unspliced)
+        trunc = {len(keys_sr) + j: m for j, m in trunc_b.items()}
+        init = np.tile(lr_bulk_theta.mean(axis=0), (K, 1))
+        init = np.maximum(init / init.sum(axis=1, keepdims=True), 1e-10)
+        res = fit_bias(em, trunc=trunc, frag=frag, n_outer=8, run_kw={**RUN_KW, "accelerate": "squarem"}, verbose=True,
+                       init_theta=init)
+        record(variant, res, t0, len(libs))
+        prof = em.design_profile(X)
+        fits[variant] = ({c: res.theta[i] for i, c in enumerate(classes)}, models)
+        fits[f"{variant}_consensus"] = ({c: prof[i] for i, c in enumerate(classes)}, models)
+        for i, c in enumerate(classes):
+            tpm[f"{variant}|{c}"] = molar_to_tpm(res.theta[i])
+            tpm[f"{variant}_consensus|{c}"] = molar_to_tpm(prof[i])
     pd.DataFrame(summary).to_csv(out / "fits.tsv", sep="\t", index=False)
     pd.DataFrame(tpm, index=names).to_csv(out / "tpm.tsv.gz", sep="\t", float_format="%.6g")
 
@@ -241,4 +250,4 @@ def main(kdir, ss2_pkl, ref_dir, out_dir, lr_fraction=0.25, test_fraction=0.1):
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:5], *(float(x) for x in sys.argv[5:7]))
+    main(*sys.argv[1:5], *(float(x) for x in sys.argv[5:7]), *sys.argv[7:8])
