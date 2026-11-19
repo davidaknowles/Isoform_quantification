@@ -322,6 +322,20 @@ Scoring (within-gene isoform fractions, genes with ≥ 20 truth UMIs on ≥ 2 tr
 
 At a typical gene the truth's cell-type differences are as small as replicate noise (0.040 vs 0.037), while every estimate is 0.10–0.18 away: the gene-TV score measures platform and protocol agreement (bulk PacBio vs 10x ScISOr-Seq2 vs Smart-seq2), which the cell-type-agnostic LR_bulk wins. Specificity is the mean, over other classes c', of TV(estimate of c', truth c) − TV(estimate of c, truth c). Differential isoform usage (DIU) restricts to genes where a class's truth differs from the mean of the region's other classes by gene TV ≥ 0.2 (≥ 100 UMIs in each) and correlates Δψ = ψ(class) − mean ψ(other classes) between estimate and truth. On these genes the joint consensus captures cell-type isoform differences best (median r 0.67 vs 0.58 SR alone; LR_bulk has none by construction). The joint base units fail exactly where composition absorbed the bulk (cortex OPC r = −0.03, hippocampus astrocyte r = −0.45); the consensus profile avoids this.
 
+### 2026-11-18 PBMC Smart-seq2 vs Parse, scored against Kinnex single-cell long reads
+
+Smart-seq2 PBMCs of Ding et al. 2020 (GSE132044; HCA per-cell HISAT2 BAMs, two donors), labelled with CellTypist Immune_All_Low with majority voting from the GEO counts (the labels of the Kinnex and Parse units): 16 cell type × donor groups, 577 cells, 48–497M fragment alignments per group (`analyses/pbmc_ss2/`). SR-only fits per group (FragmentModel), and Parse SR alone per cell type (the full run's SR libraries and position models, without long reads). Reference: the Kinnex long-read-only fit of the full PBMC run. Scores per cell type on genes with ≥ 2 spliced isoforms and ≥ 5 TPM in both (9 shared cell types; medians):
+
+| | Smart-seq2 | Parse |
+|---|---|---|
+| gene TV to Kinnex LR | 0.604 | 0.605 |
+| specificity margin | 0.009 | 0.014 |
+| DIU Δψ Pearson | 0.252 | 0.173 |
+| DIU sign agreement | 0.559 | 0.454 |
+| SS2 donor 1 vs 2, gene TV | 0.372 | |
+
+DIU genes: those where the cell type's LR profile differs from the mean of the other types by gene TV ≥ 0.2 (≥ 20 TPM in each), 49–353 per type. Absolute agreement with the LR profiles is poor for both short-read technologies (gene TV 0.6; two SS2 donors of one cell type already differ by 0.37), consistent with short reads leaving within-gene fractions weakly identified. On cell-type isoform differences Smart-seq2 is better than Parse (Δψ r 0.25 vs 0.17; sign agreement 0.56 vs 0.45, Parse below chance), as expected from full-length coverage. All short-read sets are from donors other than the Kinnex ones.
+
 ### 2026-11-18 SR fragment G/C model; short-read bias is not the platform gap
 
 `FragmentModel(gc=GCTable)` (`joli/gc.py`): fragment weight × g(k), k one of 12 G/C bins of the fragment (outer bins < 25% and > 75%); b_t = Σ_j p_j Σ_s g(GC(t, s, m_j)) from per-transcript shares of start positions per G/C bin, computed at 8 fragment lengths (100–700 bp, each fld bin uses the nearest) from ≤ 128 evenly spaced starts, sequences stored as packed G/C bits. The M-step alternates the fld fixed point (with G/C-weighted start counts) and the analogous fixed point for g. Recovers a simulated G/C curve to 5%. Also fixed in the shared fixed point: a fragment-length bin longer than every transcript has an all-zero column and could take all the mass (hidden so far because real references contain long transcripts); such bins now get 0.

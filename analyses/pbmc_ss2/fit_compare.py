@@ -137,4 +137,4 @@ def main(pkl, lr_tpm, t2g_path, out_dir, parse_tpm=None):
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:5])
+    main(*sys.argv[1:6])
