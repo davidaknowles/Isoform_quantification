@@ -20,6 +20,8 @@ Fits:
 Optional variants (comma-separated, default joint):
   joint_noSR      the same bulk mixture with deconvolved composition and design prior, without Smart-seq2 reads
   joint_truecomp  as joint with the training molecules' label shares as composition (diagnostic only)
+  any of these with suffixes _tau<x> (unit noise sd, default TAU) and _csd<y> (class effect sd, default CLASS_SD),
+  e.g. joint_tau0.3
 Composition: deconvolution estimates are reported next to the training molecules' label shares, which are
 not used in fitting.
 
@@ -32,6 +34,7 @@ Run: python analyses/pbmc_ss2/predict_kinnex.py <kinnex_dir> <ss2_libraries.pkl>
                                                  [lr_fraction] [test_fraction] [variants]
 """
 
+import re
 import sys
 import time
 from pathlib import Path
@@ -60,12 +63,12 @@ LINEAGE_SD, CLASS_SD, TAU = 2.0, 0.5, 1.0
 RUN_KW = dict(max_iter=20000, ll_rel_tol=1e-10)
 
 
-def design(classes):
+def design(classes, class_sd=CLASS_SD):
     lins = sorted(set(LINEAGE.values()))
     X = np.zeros((len(classes), 1 + len(lins) + len(classes)))
     for i, c in enumerate(classes):
         X[i, [0, 1 + lins.index(LINEAGE[c]), 1 + len(lins) + i]] = 1.0
-    sd = np.r_[np.inf, np.full(len(lins), LINEAGE_SD), np.full(len(classes), CLASS_SD)]
+    sd = np.r_[np.inf, np.full(len(lins), LINEAGE_SD), np.full(len(classes), class_sd)]
     return X, sd
 
 
@@ -178,13 +181,16 @@ def main(kdir, ss2_pkl, ref_dir, out_dir, lr_fraction=0.25, test_fraction=0.1, v
     print(comp_df.groupby("class")[["deconvolution", "true"]].mean().round(3).to_string(), flush=True)
 
     # joint variants: Smart-seq2 groups (or none) + bulk long reads
-    X, sd = design(classes)
     nb = len(classes)
     truec = {b: np.array([true_comp.get((b, c), 0.0) for c in classes]) for b in bulk_keys}
     for variant in variants.split(","):
         t0 = time.time()
-        use_sr = variant != "joint_noSR"
-        cmp = truec if variant == "joint_truecomp" else comp
+        kind = re.sub(r"_(tau|csd)[0-9.]+", "", variant)
+        tau = float(re.search(r"_tau([0-9.]+)", variant).group(1)) if "_tau" in variant else TAU
+        csd = float(re.search(r"_csd([0-9.]+)", variant).group(1)) if "_csd" in variant else CLASS_SD
+        X, sd = design(classes, csd)
+        use_sr = kind != "joint_noSR"
+        cmp = truec if kind == "joint_truecomp" else comp
         keys_sr = sr_keys if use_sr else []
         cls_sr = sr_class if use_sr else []
         K = nb + len(keys_sr)
@@ -195,7 +201,7 @@ def main(kdir, ss2_pkl, ref_dir, out_dir, lr_fraction=0.25, test_fraction=0.1, v
         for j, b in enumerate(bulk_keys):
             pi[len(keys_sr) + j, :nb] = cmp[b] / cmp[b].sum()
         em = JointEM(libs, pi=pi, pool="design_gene", design=X, design_sd=sd, base=base, groups=gene_groups,
-                     scale_groups=[-1] * nb + [0] * len(keys_sr), pool_tau=TAU, design_inner=3, mixture="reads")
+                     scale_groups=[-1] * nb + [0] * len(keys_sr), pool_tau=tau, design_inner=3, mixture="reads")
         frag = {}
         for i, g in enumerate(keys_sr):
             fm = FragmentModel(tx_len)
