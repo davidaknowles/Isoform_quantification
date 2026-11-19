@@ -20,8 +20,8 @@ Fits:
 Optional variants (comma-separated, default joint):
   joint_noSR      the same bulk mixture with deconvolved composition and design prior, without Smart-seq2 reads
   joint_truecomp  as joint with the training molecules' label shares as composition (diagnostic only)
-  any of these with suffixes _tau<x> (unit noise sd, default TAU) and _csd<y> (class effect sd, default CLASS_SD),
-  e.g. joint_tau0.3
+  any of these with suffixes _tau<x> (unit noise sd, default TAU), _csd<y> (class effect sd, default CLASS_SD) and
+  _lsd<z> (lineage effect sd, default LINEAGE_SD), e.g. joint_tau0.1_csd0.03_lsd0.03 (classes shrunk together)
 Composition: deconvolution estimates are reported next to the training molecules' label shares, which are
 not used in fitting.
 
@@ -63,12 +63,12 @@ LINEAGE_SD, CLASS_SD, TAU = 2.0, 0.5, 1.0
 RUN_KW = dict(max_iter=20000, ll_rel_tol=1e-10)
 
 
-def design(classes, class_sd=CLASS_SD):
+def design(classes, class_sd=CLASS_SD, lineage_sd=LINEAGE_SD):
     lins = sorted(set(LINEAGE.values()))
     X = np.zeros((len(classes), 1 + len(lins) + len(classes)))
     for i, c in enumerate(classes):
         X[i, [0, 1 + lins.index(LINEAGE[c]), 1 + len(lins) + i]] = 1.0
-    sd = np.r_[np.inf, np.full(len(lins), LINEAGE_SD), np.full(len(classes), class_sd)]
+    sd = np.r_[np.inf, np.full(len(lins), lineage_sd), np.full(len(classes), class_sd)]
     return X, sd
 
 
@@ -185,10 +185,11 @@ def main(kdir, ss2_pkl, ref_dir, out_dir, lr_fraction=0.25, test_fraction=0.1, v
     truec = {b: np.array([true_comp.get((b, c), 0.0) for c in classes]) for b in bulk_keys}
     for variant in variants.split(","):
         t0 = time.time()
-        kind = re.sub(r"_(tau|csd)[0-9.]+", "", variant)
+        kind = re.sub(r"_(tau|csd|lsd)[0-9.]+", "", variant)
         tau = float(re.search(r"_tau([0-9.]+)", variant).group(1)) if "_tau" in variant else TAU
         csd = float(re.search(r"_csd([0-9.]+)", variant).group(1)) if "_csd" in variant else CLASS_SD
-        X, sd = design(classes, csd)
+        lsd = float(re.search(r"_lsd([0-9.]+)", variant).group(1)) if "_lsd" in variant else LINEAGE_SD
+        X, sd = design(classes, csd, lsd)
         use_sr = kind != "joint_noSR"
         cmp = truec if kind == "joint_truecomp" else comp
         keys_sr = sr_keys if use_sr else []
