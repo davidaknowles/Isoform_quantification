@@ -23,7 +23,8 @@ Optional variants (comma-separated, default joint; "-" for the long-read fits on
   joint_noSR      the same bulk mixture with deconvolved composition and design prior, without Smart-seq2 reads
   joint_truecomp  as joint with the training molecules' label shares as composition (diagnostic only)
   any of these with suffixes _tau<x> (unit noise sd, default TAU), _csd<y> (class effect sd, default CLASS_SD) and
-  _lsd<z> (lineage effect sd, default LINEAGE_SD), e.g. joint_tau0.1_csd0.03_lsd0.03 (classes shrunk together)
+  _lsd<z> (lineage effect sd, default LINEAGE_SD), e.g. joint_tau0.1_csd0.03_lsd0.03 (classes shrunk together), and
+  _srw<w> (Smart-seq2 counts multiplied by w: tempers the short-read likelihood against the long reads)
 Composition: deconvolution estimates are reported next to the training molecules' label shares, which are
 not used in fitting.
 
@@ -36,6 +37,7 @@ Run: python analyses/pbmc_ss2/predict_kinnex.py <kinnex_dir> <ss2_libraries.pkl>
                                                  [lr_fraction] [test_fraction] [variants]
 """
 
+import copy
 import re
 import sys
 import time
@@ -72,6 +74,17 @@ def design(classes, class_sd=CLASS_SD, lineage_sd=LINEAGE_SD):
         X[i, [0, 1 + lins.index(LINEAGE[c]), 1 + len(lins) + i]] = 1.0
     sd = np.r_[np.inf, np.full(len(lins), lineage_sd), np.full(len(classes), class_sd)]
     return X, sd
+
+
+def scaled(lib, w):
+    """Library with EC counts multiplied by w (w = 1: the library itself)."""
+    if w == 1.0:
+        return lib
+    tcc = copy.copy(lib.tcc)
+    tcc.ec_counts = np.asarray(lib.tcc.ec_counts, dtype=np.float64) * w
+    out = copy.copy(lib)
+    out.tcc = tcc
+    return out
 
 
 def kit_models(keys, kit_of, tx_len, unspliced):
@@ -196,7 +209,8 @@ def main(kdir, ss2_pkl, ref_dir, out_dir, lr_fraction=0.25, test_fraction=0.1, v
     truec = {b: np.array([true_comp.get((b, c), 0.0) for c in classes]) for b in bulk_keys}
     for variant in [] if variants == "-" else variants.split(","):
         t0 = time.time()
-        kind = re.sub(r"_(tau|csd|lsd)[0-9.]+", "", variant)
+        kind = re.sub(r"_(tau|csd|lsd|srw)[0-9.e-]+", "", variant)
+        srw = float(re.search(r"_srw([0-9.e-]+)", variant).group(1)) if "_srw" in variant else 1.0
         tau = float(re.search(r"_tau([0-9.]+)", variant).group(1)) if "_tau" in variant else TAU
         csd = float(re.search(r"_csd([0-9.]+)", variant).group(1)) if "_csd" in variant else CLASS_SD
         lsd = float(re.search(r"_lsd([0-9.]+)", variant).group(1)) if "_lsd" in variant else LINEAGE_SD
@@ -207,7 +221,7 @@ def main(kdir, ss2_pkl, ref_dir, out_dir, lr_fraction=0.25, test_fraction=0.1, v
         cls_sr = sr_class if use_sr else []
         K = nb + len(keys_sr)
         base = [-1] * nb + [classes.index(c) for c in cls_sr]
-        libs = [z["sr"][g][0] for g in keys_sr] + [bulk[b] for b in bulk_keys]
+        libs = [scaled(z["sr"][g][0], srw) for g in keys_sr] + [bulk[b] for b in bulk_keys]
         pi = np.zeros((len(libs), K))
         pi[np.arange(len(keys_sr)), nb + np.arange(len(keys_sr))] = 1.0
         for j, b in enumerate(bulk_keys):
