@@ -34,3 +34,16 @@ def mixture_weights(y, S, w0=None, max_iter=5000, tol=1e-10):
             break
         ll_old = ll
     return w, float(y @ np.log(w @ S))
+
+
+def single_gene_counts(ptr, values, counts, gene_of, n_genes):
+    """
+    Reads per gene from equivalence classes whose targets all belong to one gene (no isoform-level
+    estimation). ptr, values: flat ECs (EC e is values[ptr[e]:ptr[e + 1]]); counts (E,); gene_of (T,) gene
+    code per target, negative for targets outside any gene. Returns (n_genes,).
+    """
+    g = np.asarray(gene_of)[np.asarray(values)]
+    lo = np.minimum.reduceat(g, ptr[:-1])
+    hi = np.maximum.reduceat(g, ptr[:-1])
+    one = (lo == hi) & (lo >= 0)
+    return np.bincount(lo[one], weights=np.asarray(counts, dtype=np.float64)[one], minlength=n_genes)

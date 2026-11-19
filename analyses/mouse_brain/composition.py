@@ -2,8 +2,8 @@
 Cell-class composition of the bulk long-read tissues by gene-level deconvolution (joli.deconv.mixture_weights).
 
 Bulk gene profile: the LR_bulk fit of each tissue (molar fractions, spliced targets, summed per gene).
-Reference profiles: the SR_only fits of the tissue's region x class groups (mean over ages, spliced targets
-summed per gene) and, for cortex, Allen MOp SMART-seq glutamatergic and GABAergic neurons (exon read counts
+Reference profiles: the gene-level SR profiles of the tissue's region x class groups (fit.py sr_genes.tsv.gz,
+from single-gene ECs; mean over ages) and, for cortex, Allen MOp SMART-seq glutamatergic and GABAergic neurons (exon read counts
 summed per class and divided by the median spliced transcript length of the gene, so on a molecule scale;
 the Tabula Muris Senis cortex neurons express little Slc17a7 and do not represent cortical excitatory
 neurons). Neuron components are summed into the neuron class. Weights are fractions of bulk molecules.
@@ -63,11 +63,14 @@ def allen_profiles(d, names, glen):
 def main(fit_dir, ref_dir, allen_dir, out):
     names, glen = gtf_genes(Path(ref_dir) / "basic.gtf")
     tpm = pd.read_csv(Path(fit_dir) / "tpm.tsv.gz", sep="\t", index_col=0,
-                      usecols=lambda c: c == "Unnamed: 0" or c.startswith(("SR_only|", "LR_bulk|")))
+                      usecols=lambda c: c == "Unnamed: 0" or c.startswith("LR_bulk|"))
     tpm = tpm[~tpm.index.str.endswith("-U")]
     t2g = pd.read_csv(Path(ref_dir) / "t2g.tsv", sep="\t", header=None, index_col=0)[1]
     sym = names.reindex(t2g.reindex(tpm.index)).to_numpy()
-    G = tpm[pd.notna(sym)].groupby(sym[pd.notna(sym)]).sum()               # gene symbol x fit column
+    G = tpm[pd.notna(sym)].groupby(sym[pd.notna(sym)]).sum()               # gene symbol x LR_bulk tissue
+    srg = pd.read_csv(Path(fit_dir) / "sr_genes.tsv.gz", sep="\t", index_col=0)
+    ssym = names.reindex(t2g.reindex(srg.index)).to_numpy()
+    S = srg[pd.notna(ssym)].groupby(ssym[pd.notna(ssym)]).sum()              # gene symbol x SR group
 
     allen = pd.DataFrame()
     if allen_dir != "-":
@@ -77,8 +80,8 @@ def main(fit_dir, ref_dir, allen_dir, out):
     for col in [c for c in G.columns if c.startswith("LR_bulk|")]:
         tissue = col.split("|")[1]
         ref = {}
-        for c in sorted({c.split("|")[2] for c in G.columns if c.startswith(f"SR_only|{tissue}|")}):
-            ref[f"{c}:SR"] = G[[x for x in G.columns if x.startswith(f"SR_only|{tissue}|{c}|")]].mean(axis=1)
+        for c in sorted({c.split("|")[1] for c in S.columns if c.startswith(f"{tissue}|")}):
+            ref[f"{c}:SR"] = S[[x for x in S.columns if x.startswith(f"{tissue}|{c}|")]].mean(axis=1)
         ref = pd.DataFrame(ref)
         if tissue == "Cortex" and len(allen):
             ref = ref.join(allen, how="inner")

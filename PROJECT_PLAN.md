@@ -42,7 +42,7 @@ Open
 
 Done
 - Data survey (LABNOTEBOOK.md).
-- Mouse-brain pilot: Tabula Muris Senis Smart-seq2 (46 region × class × age groups) + ENCODE bulk PacBio (cortex, hippocampus) as mixtures over region × class units with composition estimated, design_gene prior; scored against Joglekar 2024 P56 ScISOr-Seq2. On genes with cell-type-specific isoform usage in the truth, the joint consensus tracks Δψ best (median r 0.67 vs 0.58 SR alone).
+- Mouse-brain pilot: Tabula Muris Senis Smart-seq2 (46 region × class × age groups) + ENCODE bulk PacBio (cortex, hippocampus) as mixtures over region × class units with composition estimated, design_gene prior; scored against Joglekar 2024 P56 ScISOr-Seq2. On genes with cell-type-specific isoform usage in the truth, the joint consensus tracks Δψ (median r 0.67).
 - Composition: estimated in the EM it was not identified (cortex 71% OPC; those units became bulk-like). Now fixed by gene-level deconvolution (Allen MOp neurons added to the cortex reference; cortex 73% neuron, hippocampus 61%) as read shares (`JointEM(mixture="reads")`), which keeps design_gene MM monotone; converged in 2.5 h; no joint unit fails against the truth any more.
 
 Open

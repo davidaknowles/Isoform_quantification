@@ -305,7 +305,7 @@ Full-data refit with design_gene as the default joint fit (`joint_celltype.py`; 
 
 Data: Tabula Muris Senis Smart-seq2 brain cells pooled into 46 groups of region (cortex, hippocampus, striatum, cerebellum) × cell class (neuron, astrocyte, oligodendrocyte, OPC, microglia, endothelial, pericyte) × age (5,722 cells, 25% of fragments); ENCODE mouse bulk PacBio cortex and hippocampus (45 libraries); GENCODE vM37 basic with unspliced targets. Ground truth: Joglekar et al. 2024 P56 ScISOr-Seq2 isoform counts per region × cell class (two replicates M1, M2), mapped to vM37 (57% of UMIs).
 
-Fits: SR_only (one unit per group, FragmentModel), LR_bulk (one unit per tissue, read-end model), and joint (design_gene: 27 region × class base units with a design prior of intercept + region + lineage + class; each SR group is its base unit rescaled per gene, with one SR scale profile shared by all SR units up to a unit factor; each bulk LR library a mixture over its region's base units with composition estimated). Joint fit 642 MM steps, converged, 1 h 49 min (total job 2 h).
+Fits: SR_only (one unit per group, FragmentModel; used only for gene totals and as a warm start, never scored at isoform level), LR_bulk (one unit per tissue, read-end model), and joint (design_gene: 27 region × class base units with a design prior of intercept + region + lineage + class; each SR group is its base unit rescaled per gene, with one SR scale profile shared by all SR units up to a unit factor; each bulk LR library a mixture over its region's base units with composition estimated). Joint fit 642 MM steps, converged, 1 h 49 min (total job 2 h).
 
 Composition estimates are implausible: cortex bulk 71% OPC, 17% neuron; hippocampus 55% astrocyte, 24% neuron. The dominant units are those with the fewest SR cells (cortex OPC 65, hippocampus astrocyte 44), so weakly constrained base units absorb the bulk profile.
 
@@ -314,27 +314,20 @@ Scoring (within-gene isoform fractions, genes with ≥ 20 truth UMIs on ≥ 2 tr
 | estimate | median gene TV | specificity | DIU Δψ Pearson (median) | DIU sign agreement |
 |---|---|---|---|---|
 | LR_bulk | 0.104 | 0 | 0 | – |
-| SR_only | 0.180 | 0.025 | 0.578 | 0.784 |
 | joint | 0.160 | 0.014 | 0.639 | 0.811 |
 | joint consensus | 0.136 | 0.013 | 0.674 | 0.829 |
 | truth M1 vs M2 | 0.037 | | | |
 | truth, other classes pooled | 0.040 | | | |
 
-At a typical gene the truth's cell-type differences are as small as replicate noise (0.040 vs 0.037), while every estimate is 0.10–0.18 away: the gene-TV score measures platform and protocol agreement (bulk PacBio vs 10x ScISOr-Seq2 vs Smart-seq2), which the cell-type-agnostic LR_bulk wins. Specificity is the mean, over other classes c', of TV(estimate of c', truth c) − TV(estimate of c, truth c). Differential isoform usage (DIU) restricts to genes where a class's truth differs from the mean of the region's other classes by gene TV ≥ 0.2 (≥ 100 UMIs in each) and correlates Δψ = ψ(class) − mean ψ(other classes) between estimate and truth. On these genes the joint consensus captures cell-type isoform differences best (median r 0.67 vs 0.58 SR alone; LR_bulk has none by construction). The joint base units fail exactly where composition absorbed the bulk (cortex OPC r = −0.03, hippocampus astrocyte r = −0.45); the consensus profile avoids this.
+At a typical gene the truth's cell-type differences are as small as replicate noise (0.040 vs 0.037), while every estimate is 0.10–0.18 away: the gene-TV score measures platform and protocol agreement (bulk PacBio vs 10x ScISOr-Seq2 vs Smart-seq2), which the cell-type-agnostic LR_bulk wins. Specificity is the mean, over other classes c', of TV(estimate of c', truth c) − TV(estimate of c, truth c). Differential isoform usage (DIU) restricts to genes where a class's truth differs from the mean of the region's other classes by gene TV ≥ 0.2 (≥ 100 UMIs in each) and correlates Δψ = ψ(class) − mean ψ(other classes) between estimate and truth. On these genes the joint consensus captures cell-type isoform differences (median r 0.67; LR_bulk has none by construction). The joint base units fail exactly where composition absorbed the bulk (cortex OPC r = −0.03, hippocampus astrocyte r = −0.45); the consensus profile avoids this.
 
-### 2026-11-18 PBMC Smart-seq2 vs Parse, scored against Kinnex single-cell long reads
+### 2026-11-18 No short-read-only isoform fits in the atlas pipeline
 
-Smart-seq2 PBMCs of Ding et al. 2020 (GSE132044; HCA per-cell HISAT2 BAMs, two donors), labelled with CellTypist Immune_All_Low with majority voting from the GEO counts (the labels of the Kinnex and Parse units): 16 cell type × donor groups, 577 cells, 48–497M fragment alignments per group (`analyses/pbmc_ss2/`). SR-only fits per group (FragmentModel), and Parse SR alone per cell type (the full run's SR libraries and position models, without long reads). Reference: the Kinnex long-read-only fit of the full PBMC run. Scores per cell type on genes with ≥ 2 spliced isoforms and ≥ 5 TPM in both (9 shared cell types; medians):
+The atlas fits (`analyses/mouse_brain/fit.py`, used for mouse brain and Tabula Sapiens) no longer fit short reads alone at isoform level. Gene-level SR profiles for the composition deconvolution come from reads in ECs whose targets are all spliced isoforms of one gene (`joli.deconv.single_gene_counts`), divided by the gene's effective length (median spliced isoform length minus mean fragment length); SR units start from their base unit's long-read profile. Mouse brain with these references: cortex 92% neuron (77% glutamatergic, 14% GABAergic), 4% astrocyte, 2% oligodendrocyte; hippocampus 68% neuron, 16% microglia, 10% oligodendrocyte (against 73% and 61% neuron with the earlier references). The mouse-brain fits above used the earlier composition; the evaluation no longer scores any short-read-only estimate.
 
-| | Smart-seq2 | Parse |
-|---|---|---|
-| gene TV to Kinnex LR | 0.604 | 0.605 |
-| specificity margin | 0.009 | 0.014 |
-| DIU Δψ Pearson | 0.252 | 0.173 |
-| DIU sign agreement | 0.559 | 0.454 |
-| SS2 donor 1 vs 2, gene TV | 0.372 | |
+### 2026-11-18 PBMC Smart-seq2 (Ding et al. 2020) processed for joint fits with Kinnex
 
-DIU genes: those where the cell type's LR profile differs from the mean of the other types by gene TV ≥ 0.2 (≥ 20 TPM in each), 49–353 per type. Absolute agreement with the LR profiles is poor for both short-read technologies (gene TV 0.6; two SS2 donors of one cell type already differ by 0.37), consistent with short reads leaving within-gene fractions weakly identified. On cell-type isoform differences Smart-seq2 is better than Parse (Δψ r 0.25 vs 0.17; sign agreement 0.56 vs 0.45, Parse below chance), as expected from full-length coverage. All short-read sets are from donors other than the Kinnex ones.
+Smart-seq2 PBMCs of Ding et al. 2020 (GSE132044; HCA per-cell HISAT2 BAMs, two donors), labelled with CellTypist Immune_All_Low with majority voting from the GEO counts (the labels of the Kinnex and Parse units): 16 cell type × donor groups, 577 cells, 48–497M fragment alignments per group (`analyses/pbmc_ss2/make_groups.py`, libraries via the mouse-brain scripts). A first comparison scored short-read-only isoform fits (Smart-seq2 and Parse) against the Kinnex profiles; it is withdrawn, since short reads alone do not identify isoform abundances and are never fitted or scored at isoform level. What short reads add is tested only through joint fits against the long-read-only control (held-out long reads).
 
 ### 2026-11-18 SR fragment G/C model; short-read bias is not the platform gap
 
@@ -344,15 +337,11 @@ SG-NEx spike-ins (mean over replicates, gene TV median of within-gene fractions)
 
 | fit | sequins | SIRV-4 | SIRV E2 |
 |---|---|---|---|
-| SR, salmon no bias | 0.133 | 0.260 | 0.246 |
-| SR, salmon seq + G/C + position bias | 0.122 | 0.253 | 0.293 |
-| SRfrag | 0.136 | 0.237 | 0.287 |
-| SRfrag + G/C | 0.132 | 0.252 | 0.259 |
 | direct cDNA, read-end model | 0.073 | 0.172 | 0.183 |
 | SRfrag + both ONT, read-end model | 0.064 | 0.143 | 0.131 |
 | SRfrag + G/C + both ONT, read-end model | 0.062 | 0.144 | 0.137 |
 
-The fitted G/C curve is strong and reproducible (relative rate 0.06 at < 25% G/C, 1.2 at 50–55%, 0.08–0.15 at > 75%, alike in H9 and HEYA8), but neither it nor salmon's full bias correction changes short-read isoform fractions much; abundance SD of log ratio improves slightly (SIRV-4 1.98 → 1.95). Short-read isoform error (0.13–0.29) reflects fragment ambiguity rather than uncorrected bias, and long reads halve it. The G/C model stays optional (off by default).
+The fitted G/C curve is strong and reproducible (relative rate 0.06 at < 25% G/C, 1.2 at 50–55%, 0.08–0.15 at > 75%, alike in H9 and HEYA8), but the joint fit's isoform fractions do not change (sequins 0.064 → 0.062, SIRV-4 0.143 → 0.144, SIRV E2 0.131 → 0.137). The G/C model stays optional (off by default). (Short-read-only fits run alongside are not reported: short reads alone are not fitted at isoform level.)
 
 ### 2026-11-18 Mouse-brain pilot: deconvolved composition, read-share mixtures, monotone design_gene fits
 
@@ -365,13 +354,12 @@ Fixed composition with read shares: no decreasing iterate after the first step (
 | estimate | median gene TV | specificity | DIU Δψ Pearson (median) | DIU sign agreement |
 |---|---|---|---|---|
 | LR_bulk | 0.104 | 0 | 0 | – |
-| SR_only | 0.180 | 0.024 | 0.578 | 0.784 |
 | joint (composition from EM) | 0.160 | 0.014 | 0.639 | 0.811 |
 | joint (deconvolved, read shares) | 0.157 | 0.012 | 0.631 | 0.806 |
 | joint consensus (EM) | 0.136 | 0.013 | 0.674 | 0.829 |
 | joint consensus (deconvolved) | 0.142 | 0.008 | 0.657 | 0.819 |
 
-The base units that absorbed the bulk profile under EM composition recover (DIU r cortex OPC −0.03 → 0.53, hippocampus astrocyte −0.45 → 0.19), so every joint unit is now at least close to SR alone; medians change little, and the consensus profile, which had already avoided the failures, is slightly worse.
+The base units that absorbed the bulk profile under EM composition recover (DIU r cortex OPC −0.03 → 0.53, hippocampus astrocyte −0.45 → 0.19), so no joint unit fails any more; medians change little, and the consensus profile, which had already avoided the failures, is slightly worse.
 
 ### 2026-11-02 Scaling the joint fit to all molecules
 

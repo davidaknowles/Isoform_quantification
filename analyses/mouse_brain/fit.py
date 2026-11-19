@@ -2,8 +2,12 @@
 Mouse-brain pilot fits: Tabula Muris Senis Smart-seq2 pseudobulks (region x cell class x age) and ENCODE
 bulk PacBio (cortex, hippocampus), from build_libraries.py.
 
+Short reads alone are never fitted at isoform level (they do not identify isoform abundances). Per SR group,
+sr_genes.tsv.gz gives gene-level molar profiles from reads in ECs whose targets are all spliced isoforms of
+one gene, divided by the gene's effective length (median spliced isoform length minus the mean fragment
+length), for the composition deconvolution (composition.py).
+
 Fits:
-  SR_only  each SR group its own unit (FragmentModel per library): Smart-seq2 alone
   LR_bulk  one unit per bulk tissue (AnchoredTruncationModel shared by the LR libraries): bulk LR alone
   joint    base units (region, class) carry transcript abundances with a design prior (intercept + region
            + lineage + class effects, unit noise TAU); each SR group is its base unit rescaled per gene
@@ -15,7 +19,8 @@ Fits:
            mean long-read sampling rates across cell classes). Base units of regions without
            bulk LR (striatum, cerebellum) are informed by SR and the prior.
 Outputs: tpm.tsv.gz (transcripts x fit|unit; joint base units "<region>|<class>", SR units
-"<region>|<class>|<age>@SR", consensus profiles "<region>|<class>|consensus"), composition.tsv, fits.tsv.
+"<region>|<class>|<age>@SR", consensus profiles "<region>|<class>|consensus"), sr_genes.tsv.gz (genes, indexed by
+one spliced isoform each, x SR group), composition.tsv, fits.tsv.
 
 Run: python analyses/mouse_brain/fit.py <libraries.pkl> <out_dir> [ct_sd] [composition.tsv]
 """
@@ -28,6 +33,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from joli.deconv import single_gene_counts
 from joli.joint import JointEM, molar_to_tpm
 from joli.lr_bias import AnchoredTruncationModel, FragmentModel, fit_bias
 
@@ -52,6 +58,24 @@ def design(base_units, ct_sd):
     return X, sd, cols
 
 
+def sr_genes(z, keys):
+    """Gene-level molar profiles of SR groups (genes indexed by their first spliced isoform; see module doc)."""
+    names, tx_len = np.asarray(z["names"]), z["tx_len"]
+    gene = np.where(z["unspliced"], -1, z["genes"])
+    sp = gene >= 0
+    first = pd.Series(np.flatnonzero(sp)).groupby(gene[sp]).first()           # gene code -> first spliced isoform
+    glen = pd.Series(tx_len[sp]).groupby(gene[sp]).median().to_numpy()
+    fmid = FragmentModel(tx_len[:1]).fmid
+    out = {}
+    for g in keys:
+        lib, pf = z["sr"][g]
+        ecs = lib.tcc.ec_transcripts
+        n = single_gene_counts(ecs.ptr, ecs.values, lib.tcc.ec_counts, gene, int(gene.max()) + 1)[first.index]
+        x = n / np.maximum(glen - pf @ fmid + 1.0, 1.0)
+        out[g] = x / x.sum()
+    return pd.DataFrame(out, index=pd.Index(names[first.to_numpy()], name="gene_isoform"))
+
+
 def main(pkl, out_dir, ct_sd=1.0, composition_tsv=None):
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -71,15 +95,8 @@ def main(pkl, out_dir, ct_sd=1.0, composition_tsv=None):
             fms[i] = fm
         return fms
 
-    # SR alone: one unit per group
-    t0 = time.time()
-    em = JointEM([z["sr"][g][0] for g in sr_keys], units=list(range(len(sr_keys))))
-    res = fit_bias(em, frag=frag_models(sr_keys), n_outer=8, run_kw=RUN_KW, verbose=True)
-    for i, g in enumerate(sr_keys):
-        tpm[f"SR_only|{g}"] = molar_to_tpm(res.theta[i])
-    summary.append({"fit": "SR_only", "loglik": res.loglik[-1], "n_iter": res.n_iter, "converged": res.converged,
-                    "seconds": round(time.time() - t0)})
-    print(summary[-1], flush=True)
+    # SR gene-level profiles (no isoform-level estimation)
+    sr_genes(z, sr_keys).to_csv(out / "sr_genes.tsv.gz", sep="\t", float_format="%.6g")
 
     # bulk LR alone: one unit per tissue
     t0 = time.time()
@@ -124,12 +141,13 @@ def main(pkl, out_dir, ct_sd=1.0, composition_tsv=None):
     frag = frag_models(sr_keys)
     tm = AnchoredTruncationModel(tx_len, uniform=unspliced)
     trunc = {len(sr_keys) + j: tm for j in range(len(lr_keys))}
-    # warm start: base units from the bulk tissue profile of their region (or uniform), SR units from SR_only
+    # warm start: base units from the bulk tissue profile of their region (the mean bulk profile for regions
+    # without bulk long reads); SR units from their base unit
     init = np.zeros((K, len(names)))
     for i, (r, _) in enumerate(base_units):
-        init[i] = res_lr.theta[tissues.index(r)] if r in tissues else 1.0
-    for i, g in enumerate(sr_keys):
-        init[len(base_units) + i] = tpm[f"SR_only|{g}"]
+        init[i] = res_lr.theta[tissues.index(r)] if r in tissues else res_lr.theta.mean(axis=0)
+    for i, u in enumerate(sr_units):
+        init[len(base_units) + i] = init[base_units.index(u[:2])]
     init = np.maximum(init / init.sum(axis=1, keepdims=True), 1e-10)
     res = fit_bias(em, trunc=trunc, frag=frag, n_outer=8, run_kw={**RUN_KW, "accelerate": "squarem"}, verbose=True,
                    init_theta=init, composition=composition if fixed is None else None)

@@ -1,7 +1,7 @@
 """
 Score mouse-brain fits against the single-cell long-read reference (truth.py): within-gene isoform fractions
 per region x cell class, over genes with >= MIN_GENE_UMI truth UMIs on >= 2 reference transcripts and gene TPM
->= 1 in the estimate. Estimates: SR_only (mean of the region|class groups over ages), LR_bulk (the region's
+>= 1 in the estimate. Estimates (short reads alone do not identify isoforms and are not scored): LR_bulk (the region's
 bulk tissue profile, the same for every class), joint base unit and joint consensus. Metrics: median gene TV
 of isoform fractions and Pearson of isoform fractions over all scored transcripts.
 
@@ -57,9 +57,6 @@ def main(fit_dir, truth_path, ref_dir):
         region, cls = col.split("|")[:2]
         t = truth[col]
         cands = {}
-        sr = [c for c in tpm.columns if c.startswith(f"SR_only|{region}|{cls}|")]
-        if sr:
-            cands["SR_only"] = tpm[sr].mean(axis=1)
         if f"LR_bulk|{region}" in tpm:
             cands["LR_bulk"] = tpm[f"LR_bulk|{region}"]
         for name, c in [("joint", f"joint|{region}|{cls}"), ("joint_consensus", f"joint|{region}|{cls}|consensus")]:
@@ -138,9 +135,6 @@ def gene_tv(e, t, g, ok):
 def estimates(tpm, region, cls):
     """Estimate columns for one region x class (as in main)."""
     out = {}
-    sr = [c for c in tpm.columns if c.startswith(f"SR_only|{region}|{cls}|")]
-    if sr:
-        out["SR_only"] = tpm[sr].mean(axis=1)
     if f"LR_bulk|{region}" in tpm:
         out["LR_bulk"] = tpm[f"LR_bulk|{region}"]
     for name, col in [("joint", f"joint|{region}|{cls}"), ("joint_consensus", f"joint|{region}|{cls}|consensus")]:

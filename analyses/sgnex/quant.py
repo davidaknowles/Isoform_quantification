@@ -16,8 +16,8 @@ Fits (one unit each, no prior):
                                            as +trunc with the anchored censored-length model
                                            (AnchoredTruncationModel) in place of independent end profiles
 SR effective lengths are the fixed reference that makes LR length bias identifiable.
-With the option gc, only the fragment-model fits run, each with and without the fragment G/C model
-(FragmentModel(gc=...), "+gc" in the fit name): SRfrag, SRfrag+allLR+anch.
+With the option gc, only the joint fragment-model fit SRfrag+allLR+anch runs, with and without the fragment
+G/C model (FragmentModel(gc=...), "+gc" in the fit name); short reads alone are not fitted.
 
 Writes {out_dir}/{cell}_rep{rep}_tpm.tsv.gz, _fits.tsv and _bias.tsv.
 
@@ -90,8 +90,6 @@ def main(cell, rep, sgnex_dir, out_dir, mode=None):
     if not gc_only:
         fits["SR+allLR+trunc+len"] = ([sr["bias"]] + list(lr.values()), "trunc", True, False)
     if gc_only:
-        fits["SRfrag"] = ([srf], False, False, True)
-        fits["SRfrag+gc"] = ([srf_gc], False, False, "gc")
         fits["SRfrag+allLR+anch"] = ([srf] + list(lr.values()), "anch", False, True)
         fits["SRfrag+gc+allLR+anch"] = ([srf_gc] + list(lr.values()), "anch", False, "gc")
     elif srf is not None:

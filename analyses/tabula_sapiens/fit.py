@@ -1,5 +1,5 @@
 """
-Tabula Sapiens atlas pilot fits: the mouse-brain fit (analyses/mouse_brain/fit.py: SR_only, LR_bulk, joint
+Tabula Sapiens atlas pilot fits: the mouse-brain fit (analyses/mouse_brain/fit.py: SR gene profiles, LR_bulk, joint
 design_gene with bulk long-read libraries as mixtures over their tissue's cell classes) with human cell
 classes and lineages. Region = tissue (Muscle, Heart); class effects are shared across tissues, so e.g.
 endothelial cells and macrophages of heart and muscle borrow from each other.
