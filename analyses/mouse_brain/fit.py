@@ -22,7 +22,12 @@ Outputs: tpm.tsv.gz (transcripts x fit|unit; joint base units "<region>|<class>"
 "<region>|<class>|<age>@SR", consensus profiles "<region>|<class>|consensus"), sr_genes.tsv.gz (genes, indexed by
 one spliced isoform each, x SR group), composition.tsv, fits.tsv.
 
-Run: python analyses/mouse_brain/fit.py <libraries.pkl> <out_dir> [ct_sd] [composition.tsv]
+Options as key=value after the positional arguments: tau (unit noise sd, default TAU), rsd and lsd (region and
+lineage effect sds, default REGION_SD, LINEAGE_SD) and srw (SR counts multiplied by srw, tempering the short-read
+likelihood against the long reads; default 1). Strong class shrinkage (small ct_sd and lsd) and srw < 1 were needed
+on PBMC (analyses/pbmc_ss2/predict_kinnex.py).
+
+Run: python analyses/mouse_brain/fit.py <libraries.pkl> <out_dir> [ct_sd] [composition.tsv | -] [key=value ...]
 """
 
 import copy
@@ -44,13 +49,13 @@ REGION_SD, LINEAGE_SD = 2.0, 2.0
 RUN_KW = dict(max_iter=20000, ll_rel_tol=1e-10)
 
 
-def design(base_units, ct_sd):
+def design(base_units, ct_sd, region_sd=REGION_SD, lineage_sd=LINEAGE_SD):
     """Design rows of (region, class) base units: intercept, region, lineage and class indicators."""
     regions = sorted({r for r, _ in base_units})
     lins = sorted(set(LINEAGE.values()))
     classes = sorted({c for _, c in base_units})
     cols = ["intercept"] + [f"region:{r}" for r in regions] + [f"lineage:{l}" for l in lins] + [f"class:{c}" for c in classes]
-    sd = np.r_[np.inf, np.full(len(regions), REGION_SD), np.full(len(lins), LINEAGE_SD), np.full(len(classes), ct_sd)]
+    sd = np.r_[np.inf, np.full(len(regions), region_sd), np.full(len(lins), lineage_sd), np.full(len(classes), ct_sd)]
     X = np.zeros((len(base_units), len(cols)))
     for i, (r, c) in enumerate(base_units):
         X[i, [0, 1 + regions.index(r), 1 + len(regions) + lins.index(LINEAGE[c]),
@@ -76,7 +81,20 @@ def sr_genes(z, keys):
     return pd.DataFrame(out, index=pd.Index(names[first.to_numpy()], name="gene_isoform"))
 
 
-def main(pkl, out_dir, ct_sd=1.0, composition_tsv=None):
+def scaled(lib, w):
+    """Library with EC counts multiplied by w (w = 1: the library itself)."""
+    if w == 1.0:
+        return lib
+    tcc = copy.copy(lib.tcc)
+    tcc.ec_counts = np.asarray(lib.tcc.ec_counts, dtype=np.float64) * w
+    out = copy.copy(lib)
+    out.tcc = tcc
+    return out
+
+
+def main(pkl, out_dir, ct_sd=1.0, composition_tsv=None, tau=TAU, rsd=REGION_SD, lsd=LINEAGE_SD, srw=1.0):
+    if composition_tsv == "-":
+        composition_tsv = None
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     z = pd.read_pickle(pkl)
@@ -118,7 +136,7 @@ def main(pkl, out_dir, ct_sd=1.0, composition_tsv=None):
     K = len(units)
     base = [-1] * len(base_units) + [base_units.index(u[:2]) for u in sr_units]
     scale_groups = [-1] * len(base_units) + [0] * len(sr_units)
-    libs = [z["sr"][g][0] for g in sr_keys] + [z["lr"][a] for a in lr_keys]
+    libs = [scaled(z["sr"][g][0], float(srw)) for g in sr_keys] + [z["lr"][a] for a in lr_keys]
     pi = np.zeros((len(libs), K))
     pi[np.arange(len(sr_keys)), len(base_units) + np.arange(len(sr_keys))] = 1.0
     composition = {}
@@ -134,9 +152,9 @@ def main(pkl, out_dir, ct_sd=1.0, composition_tsv=None):
         else:
             w = fixed.reindex([f"{r}|{c}" for r, c in (base_units[i] for i in allowed)]).fillna(0.0).to_numpy()
             pi[l, allowed] = w / w.sum()
-    X, sd, cols = design(base_units, ct_sd)
+    X, sd, cols = design(base_units, ct_sd, float(rsd), float(lsd))
     em = JointEM(libs, pi=pi, pool="design_gene", design=X, design_sd=sd, base=base, groups=z["gene_groups"],
-                 scale_groups=scale_groups, pool_tau=TAU, design_inner=3,
+                 scale_groups=scale_groups, pool_tau=float(tau), design_inner=3,
                  mixture="molecules" if fixed is None else "reads")
     frag = frag_models(sr_keys)
     tm = AnchoredTruncationModel(tx_len, uniform=unspliced)
@@ -170,4 +188,6 @@ def main(pkl, out_dir, ct_sd=1.0, composition_tsv=None):
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:3], *(float(x) for x in sys.argv[3:4]), *sys.argv[4:5])
+    pos = [a for a in sys.argv[1:] if "=" not in a]
+    kw = dict(a.split("=", 1) for a in sys.argv[1:] if "=" in a)
+    main(*pos[:2], *(float(x) for x in pos[2:3]), *pos[3:4], **kw)

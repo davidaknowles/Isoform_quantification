@@ -4,7 +4,7 @@ design_gene with bulk long-read libraries as mixtures over their tissue's cell c
 classes and lineages. Region = tissue (Muscle, Heart); class effects are shared across tissues, so e.g.
 endothelial cells and macrophages of heart and muscle borrow from each other.
 
-Run: python analyses/tabula_sapiens/fit.py <libraries.pkl> <out_dir> [ct_sd] [composition.tsv]
+Run: python analyses/tabula_sapiens/fit.py <libraries.pkl> <out_dir> [ct_sd] [composition.tsv | -] [key=value ...]
 """
 
 import sys
@@ -20,4 +20,6 @@ F.LINEAGE = {"mesenchymal stem cell": "stromal", "fibroblast": "stromal", "satel
              "mast cell": "immune", "hepatocyte-labelled": "other"}
 
 if __name__ == "__main__":
-    F.main(*sys.argv[1:3], *(float(x) for x in sys.argv[3:4]), *sys.argv[4:5])
+    pos = [a for a in sys.argv[1:] if "=" not in a]
+    kw = dict(a.split("=", 1) for a in sys.argv[1:] if "=" in a)
+    F.main(*pos[:2], *(float(x) for x in pos[2:3]), *pos[3:4], **kw)
