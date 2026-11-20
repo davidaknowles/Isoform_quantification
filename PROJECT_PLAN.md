@@ -43,6 +43,7 @@ Open
 Done
 - Data survey (LABNOTEBOOK.md).
 - Mouse-brain pilot: Tabula Muris Senis Smart-seq2 (46 region × class × age groups) + ENCODE bulk PacBio (cortex, hippocampus) as mixtures over region × class units with composition estimated, design_gene prior; scored against Joglekar 2024 P56 ScISOr-Seq2. On genes with cell-type-specific isoform usage in the truth, the joint consensus tracks Δψ (median r 0.67).
+- Mouse brain with PBMC-style shrinkage + SR tempering: absolute TV improves (0.160 → 0.125) but DIU against Joglekar drops (Δψ r 0.63 → 0.49); SR carries the cell-type isoform signal. Choose the SR weight by held-out LR likelihood.
 - PBMC atlas check (Smart-seq2 of other donors + label-free bulk Kinnex, deconvolved composition, predicting held-out cell-type Kinnex): no variant beats a pooled bulk LR profile (best −0.06 vs −0.02 nats per molecule overall, −0.004 vs −0.001 within gene; labelled ceiling +0.075 / +0.0006). Needs strong class shrinkage (class/lineage sd ≤ 0.1) and a tempered SR likelihood (w 0.02–0.1); these Kinnex data have little cell-type isoform signal.
 - Composition: estimated in the EM it was not identified (cortex 71% OPC; those units became bulk-like). Now fixed by gene-level deconvolution (Allen MOp neurons added to the cortex reference; cortex 73% neuron, hippocampus 61%) as read shares (`JointEM(mixture="reads")`), which keeps design_gene MM monotone; converged in 2.5 h; no joint unit fails against the truth any more.
 

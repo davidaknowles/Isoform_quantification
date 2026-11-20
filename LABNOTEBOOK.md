@@ -321,6 +321,20 @@ Scoring (within-gene isoform fractions, genes with ≥ 20 truth UMIs on ≥ 2 tr
 
 At a typical gene the truth's cell-type differences are as small as replicate noise (0.040 vs 0.037), while every estimate is 0.10–0.18 away: the gene-TV score measures platform and protocol agreement (bulk PacBio vs 10x ScISOr-Seq2 vs Smart-seq2), which the cell-type-agnostic LR_bulk wins. Specificity is the mean, over other classes c', of TV(estimate of c', truth c) − TV(estimate of c, truth c). Differential isoform usage (DIU) restricts to genes where a class's truth differs from the mean of the region's other classes by gene TV ≥ 0.2 (≥ 100 UMIs in each) and correlates Δψ = ψ(class) − mean ψ(other classes) between estimate and truth. On these genes the joint consensus captures cell-type isoform differences (median r 0.67; LR_bulk has none by construction). The joint base units fail exactly where composition absorbed the bulk (cortex OPC r = −0.03, hippocampus astrocyte r = −0.45); the consensus profile avoids this.
 
+### 2026-11-20 Mouse brain: class shrinkage and SR tempering against the Joglekar truth
+
+The PBMC settings (strong class shrinkage, tempered SR likelihood) on the mouse-brain fit, composition from gene-level SR profiles fixed as read shares; fit.py options tau, lsd, srw (class sd positional; region sd 2 throughout). Medians over region × class against Joglekar P56 (common genes; DIU genes as before):
+
+| run | gene TV | specificity | DIU Δψ r (consensus) | DIU sign agreement |
+|---|---|---|---|---|
+| LR_bulk | 0.105 | 0 | 0 | – |
+| τ 1, lineage sd 2, class sd 1, SR × 1 | 0.160 | 0.011 | 0.631 (0.665) | 0.811 (0.823) |
+| τ 0.1, lineage/class sd 0.03, SR × 1 | 0.155 | 0.011 | 0.633 (0.619) | 0.792 |
+| τ 0.1, lineage/class sd 0.1, SR × 0.1 | 0.136 | 0.012 | 0.566 (0.582) | 0.768 |
+| τ 0.1, lineage/class sd 0.03, SR × 0.02 | 0.125 | 0.003 | 0.489 (0.498) | 0.733 |
+
+At full SR weight the Smart-seq2 groups set the cell-type differences even under a strong prior; tempering lets the prior pull the classes together, improving absolute agreement with the long-read platform (TV towards LR_bulk's 0.105) but losing the cell-type isoform differences the truth confirms. In PBMC (Kinnex with almost no cell-type isoform signal) the same SR pull only hurt; here it carries the signal. The SR weight therefore has to be chosen from data, e.g. by held-out long-read likelihood (held-out bulk libraries, or held-out cell-type molecules where labels exist), not fixed.
+
 ### 2026-11-19 PBMC: Smart-seq2 + label-free bulk Kinnex predicting cell-type Kinnex
 
 The atlas setting on PBMC, where long reads carry cell labels (`analyses/pbmc_ss2/predict_kinnex.py`). 10x Kinnex molecules: 10% held out (fixed per-molecule split, as heldout_lr.py), 25% of the rest for training; training molecules of all labelled cells pooled per kit × source library into 7 label-free bulk libraries. Smart-seq2 groups (other donors) and Kinnex types merged into 6 classes (CD4 T, CD8/cytotoxic T with MAIT, NK, B, classical and non-classical monocytes). Fits: LR_bulk (one profile per bulk library), joint (design_gene: class base units with intercept + lineage + class prior, unit noise τ = 1, class sd 0.5; Smart-seq2 groups rescaled per gene; bulk libraries as read-share mixtures with composition from gene-level deconvolution), LR_celltype (labelled training long reads, the ceiling). Scores: log-likelihood per held-out molecule (cell type × kit × library) on ECs every fit can score, gain over LR_bulk.
