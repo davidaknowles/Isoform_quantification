@@ -611,3 +611,20 @@ def test_design_gene_without_scaled_units_runs():
                  groups=rng.integers(0, 40, T), scale_groups=[-1] * nb, pool_tau=1.0, mixture="reads")
     r = em.run(max_iter=200)
     assert np.isfinite(r.loglik[-1]) and np.allclose(r.theta.sum(axis=1), 1.0)
+
+
+def test_split_library_partitions_counts():
+    from joli.joint import Library
+    from joli.load_tcc import TCCData, FlatECs
+    from joli.paf import split_library
+    rng = np.random.default_rng(6)
+    ptr = np.r_[0, np.cumsum(rng.integers(1, 4, 500))]
+    counts = rng.integers(0, 50, 500).astype(float)
+    tcc = TCCData(ec_counts=counts, ec_transcripts=FlatECs(ptr, rng.integers(0, 30, ptr[-1]).astype(np.int32)),
+                  transcript_names=[f"t{i}" for i in range(30)], total_reads=0, n_targets=30, sample_dir="")
+    lib = Library("l", tcc, b=np.ones(30))
+    tr, te = split_library(lib, 0.2, seed=1)
+    np.testing.assert_array_equal(tr.tcc.ec_counts + te.tcc.ec_counts, counts)
+    assert abs(te.tcc.ec_counts.sum() / counts.sum() - 0.2) < 0.02
+    assert lib.tcc.ec_counts is counts                      # original untouched
+    np.testing.assert_array_equal(split_library(lib, 0.2, seed=1)[1].tcc.ec_counts, te.tcc.ec_counts)

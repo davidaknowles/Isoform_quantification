@@ -247,3 +247,23 @@ def concat_libraries(name, libs):
     return Library(name=name, tcc=tcc, b=first.b, platform=first.platform,
                    c=None if first.c is None else cat([l.c for l in libs]),
                    feat=None if first.feat is None else cat([l.feat for l in libs]))
+
+
+def split_library(lib, fraction, seed=0):
+    """
+    (training, held-out) copies of a library: each EC's molecules go to the held-out copy independently with
+    probability `fraction` (binomial thinning of the EC counts, i.e. a random per-molecule split; fixed seed).
+    """
+    import copy
+    rng = np.random.default_rng(seed)
+    n = np.asarray(lib.tcc.ec_counts)
+    held = rng.binomial(n.astype(np.int64), fraction).astype(np.float64)
+    out = []
+    for counts in (n - held, held):
+        tcc = copy.copy(lib.tcc)
+        tcc.ec_counts = counts
+        tcc.total_reads = int(counts.sum())
+        new = copy.copy(lib)
+        new.tcc = tcc
+        out.append(new)
+    return tuple(out)

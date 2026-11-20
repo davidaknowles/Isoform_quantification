@@ -24,8 +24,13 @@ one spliced isoform each, x SR group), composition.tsv, fits.tsv.
 
 Options as key=value after the positional arguments: tau (unit noise sd, default TAU), rsd and lsd (region and
 lineage effect sds, default REGION_SD, LINEAGE_SD) and srw (SR counts multiplied by srw, tempering the short-read
-likelihood against the long reads; default 1). Strong class shrinkage (small ct_sd and lsd) and srw < 1 were needed
+likelihood against the long reads; default 1), lr_test (a fraction of each bulk long-read library's molecules held
+out by binomial thinning, fixed seed; default 0). Strong class shrinkage (small ct_sd and lsd) and srw < 1 were needed
 on PBMC (analyses/pbmc_ss2/predict_kinnex.py).
+
+With lr_test, the held-out molecules are scored under the joint fit (each library's mixture of its tissue's base
+units, the fitted read-end model) and under LR_bulk; per-EC log-probabilities (all, and within gene) go to
+heldout_lr.npz for select_srw.py, which compares runs (e.g. a grid of srw) on ECs every run can score.
 
 Run: python analyses/mouse_brain/fit.py <libraries.pkl> <out_dir> [ct_sd] [composition.tsv | -] [key=value ...]
 """
@@ -40,7 +45,8 @@ import pandas as pd
 
 from joli.deconv import single_gene_counts
 from joli.joint import JointEM, molar_to_tpm
-from joli.lr_bias import AnchoredTruncationModel, FragmentModel, fit_bias
+from joli.lr_bias import AnchoredTruncationModel, FragmentModel, bias_weights, fit_bias
+from joli.paf import split_library
 
 LINEAGE = {"neuron": "neuron", "astrocyte": "glia", "oligodendrocyte": "glia", "OPC": "glia", "microglia": "immune",
            "endothelial": "vascular", "pericyte": "vascular"}
@@ -92,7 +98,16 @@ def scaled(lib, w):
     return out
 
 
-def main(pkl, out_dir, ct_sd=1.0, composition_tsv=None, tau=TAU, rsd=REGION_SD, lsd=LINEAGE_SD, srw=1.0):
+def heldout_logprobs(libs, pi, theta, tm, gene_groups, mixture):
+    """Per-EC log-probabilities (all, within gene) and counts of held-out libraries at fixed abundances."""
+    em = JointEM(libs, pi=pi, mixture=mixture)
+    for l, fl in enumerate(em.libs):
+        c, b = bias_weights(fl.tx, fl.feat, np.ones(len(fl.tx)), fl.b, trunc=tm)
+        em.set_bias(l, c=c, b=b)
+    return em.ec_logprob(theta), em.ec_logprob(theta, groups=gene_groups), [fl.counts for fl in em.libs]
+
+
+def main(pkl, out_dir, ct_sd=1.0, composition_tsv=None, tau=TAU, rsd=REGION_SD, lsd=LINEAGE_SD, srw=1.0, lr_test=0.0):
     if composition_tsv == "-":
         composition_tsv = None
     out = Path(out_dir)
@@ -104,6 +119,10 @@ def main(pkl, out_dir, ct_sd=1.0, composition_tsv=None, tau=TAU, rsd=REGION_SD, 
     lr_keys = sorted(z["lr"])
     lr_tissue = z["files"].set_index("accession")["tissue"]
     tpm, summary = {}, []
+    test = {}
+    if float(lr_test) > 0:
+        for j, a in enumerate(lr_keys):
+            z["lr"][a], test[a] = split_library(z["lr"][a], float(lr_test), seed=j)
 
     def frag_models(keys):
         fms = {}
@@ -120,8 +139,8 @@ def main(pkl, out_dir, ct_sd=1.0, composition_tsv=None, tau=TAU, rsd=REGION_SD, 
     t0 = time.time()
     tissues = sorted(set(lr_tissue[lr_keys]))
     em = JointEM([z["lr"][a] for a in lr_keys], units=[tissues.index(lr_tissue[a]) for a in lr_keys])
-    tm = AnchoredTruncationModel(tx_len, uniform=unspliced)
-    res_lr = fit_bias(em, trunc={i: tm for i in range(len(lr_keys))}, n_outer=8, run_kw=RUN_KW, verbose=True)
+    tm_lr = AnchoredTruncationModel(tx_len, uniform=unspliced)
+    res_lr = fit_bias(em, trunc={i: tm_lr for i in range(len(lr_keys))}, n_outer=8, run_kw=RUN_KW, verbose=True)
     for k, t in enumerate(tissues):
         tpm[f"LR_bulk|{t}"] = molar_to_tpm(res_lr.theta[k])
     summary.append({"fit": "LR_bulk", "loglik": res_lr.loglik[-1], "n_iter": res_lr.n_iter,
@@ -185,6 +204,20 @@ def main(pkl, out_dir, ct_sd=1.0, composition_tsv=None, tau=TAU, rsd=REGION_SD, 
     print(summary[-1], flush=True)
     pd.DataFrame(summary).to_csv(out / "fits.tsv", sep="\t", index=False)
     pd.DataFrame(tpm, index=names).to_csv(out / "tpm.tsv.gz", sep="\t", float_format="%.6g")
+    if test:
+        tlibs = [test[a] for a in lr_keys]
+        bulk_pi = np.zeros((len(lr_keys), len(tissues)))
+        bulk_pi[np.arange(len(lr_keys)), [tissues.index(lr_tissue[a]) for a in lr_keys]] = 1.0
+        jb = heldout_logprobs(tlibs, em.pi[len(sr_keys):], res.theta, tm, z["gene_groups"],
+                              "molecules" if fixed is None else "reads")
+        lb = heldout_logprobs(tlibs, bulk_pi, res_lr.theta, tm_lr, z["gene_groups"], "molecules")
+        arrays = {}
+        for j, a in enumerate(lr_keys):
+            arrays[f"{a}|counts"] = jb[2][j]
+            for name, (all_, within, _) in (("joint", jb), ("LR_bulk", lb)):
+                arrays[f"{a}|{name}|all"] = all_[j]
+                arrays[f"{a}|{name}|within_gene"] = within[j]
+        np.savez_compressed(out / "heldout_lr.npz", **arrays)
 
 
 if __name__ == "__main__":
