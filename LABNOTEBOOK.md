@@ -321,6 +321,20 @@ Scoring (within-gene isoform fractions, genes with ≥ 20 truth UMIs on ≥ 2 tr
 
 At a typical gene the truth's cell-type differences are as small as replicate noise (0.040 vs 0.037), while every estimate is 0.10–0.18 away: the gene-TV score measures platform and protocol agreement (bulk PacBio vs 10x ScISOr-Seq2 vs Smart-seq2), which the cell-type-agnostic LR_bulk wins. Specificity is the mean, over other classes c', of TV(estimate of c', truth c) − TV(estimate of c, truth c). Differential isoform usage (DIU) restricts to genes where a class's truth differs from the mean of the region's other classes by gene TV ≥ 0.2 (≥ 100 UMIs in each) and correlates Δψ = ψ(class) − mean ψ(other classes) between estimate and truth. On these genes the joint consensus captures cell-type isoform differences (median r 0.67; LR_bulk has none by construction). The joint base units fail exactly where composition absorbed the bulk (cortex OPC r = −0.03, hippocampus astrocyte r = −0.45); the consensus profile avoids this.
 
+### 2026-11-21 Choosing the SR weight by held-out bulk long reads does not work
+
+`fit.py lr_test=0.1` holds out 10% of each ENCODE bulk library's molecules (binomial thinning of EC counts, fixed seed, `joli.paf.split_library`) and scores them under the joint mixture and LR_bulk; `select_srw.py` compares runs on common ECs. Default prior, composition from gene-level SR profiles (estimated on all long reads), SR weight grid:
+
+| SR weight | held-out bulk LR all / within gene (vs LR_bulk) | Joglekar DIU Δψ r, consensus | sign agreement | gene TV |
+|---|---|---|---|---|
+| 1 | −0.0306 / −0.0131 | 0.664 | 0.824 | 0.146 |
+| 0.3 | −0.0098 / −0.0049 | 0.664 | 0.808 | 0.149 |
+| 0.1 | −0.0028 / −0.0017 | 0.642 | 0.804 | 0.146 |
+| 0.03 | −0.0006 / −0.0004 | 0.630 | 0.796 | 0.144 |
+| 0.01 | −0.0001 / −0.0001 | 0.611 | 0.781 | 0.133 |
+
+Held-out molecules of a library seen in training only test the mixture's bulk profile, so the criterion falls monotonically to the smallest weight, where the joint fit reproduces LR_bulk, while the truth's cell-type differences decline (gently under the default prior; steeply with strong class shrinkage). A criterion sensitive to the cell-type split: leave-one-region-out bulk prediction (fit without one region's bulk long reads, predict them from that region's Smart-seq2 groups, the shared class and lineage effects and its composition), which is also the atlas use case for regions without bulk long reads.
+
 ### 2026-11-20 Mouse brain: class shrinkage and SR tempering against the Joglekar truth
 
 The PBMC settings (strong class shrinkage, tempered SR likelihood) on the mouse-brain fit, composition from gene-level SR profiles fixed as read shares; fit.py options tau, lsd, srw (class sd positional; region sd 2 throughout). Medians over region × class against Joglekar P56 (common genes; DIU genes as before):
