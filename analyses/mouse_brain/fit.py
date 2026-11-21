@@ -25,11 +25,13 @@ one spliced isoform each, x SR group), composition.tsv, fits.tsv.
 Options as key=value after the positional arguments: tau (unit noise sd, default TAU), rsd and lsd (region and
 lineage effect sds, default REGION_SD, LINEAGE_SD) and srw (SR counts multiplied by srw, tempering the short-read
 likelihood against the long reads; default 1), lr_test (a fraction of each bulk long-read library's molecules held
-out by binomial thinning, fixed seed; default 0). Strong class shrinkage (small ct_sd and lsd) and srw < 1 were needed
+out by binomial thinning, fixed seed; default 0) and holdout_region (all bulk long-read libraries of that region left
+out of every fit and scored afterwards: leave-one-region-out). Strong class shrinkage (small ct_sd and lsd) and srw < 1 were needed
 on PBMC (analyses/pbmc_ss2/predict_kinnex.py).
 
-With lr_test, the held-out molecules are scored under the joint fit (each library's mixture of its tissue's base
-units, the fitted read-end model) and under LR_bulk; per-EC log-probabilities (all, and within gene) go to
+With lr_test or holdout_region, the held-out molecules are scored under the joint fit (each library's mixture of its
+tissue's base units with the composition used in fitting, the fitted read-end model) and under LR_bulk (the
+library's tissue profile, or the mean of the fitted tissue profiles for a held-out region); per-EC log-probabilities (all, and within gene) go to
 heldout_lr.npz for select_srw.py, which compares runs (e.g. a grid of srw) on ECs every run can score.
 
 Run: python analyses/mouse_brain/fit.py <libraries.pkl> <out_dir> [ct_sd] [composition.tsv | -] [key=value ...]
@@ -107,7 +109,8 @@ def heldout_logprobs(libs, pi, theta, tm, gene_groups, mixture):
     return em.ec_logprob(theta), em.ec_logprob(theta, groups=gene_groups), [fl.counts for fl in em.libs]
 
 
-def main(pkl, out_dir, ct_sd=1.0, composition_tsv=None, tau=TAU, rsd=REGION_SD, lsd=LINEAGE_SD, srw=1.0, lr_test=0.0):
+def main(pkl, out_dir, ct_sd=1.0, composition_tsv=None, tau=TAU, rsd=REGION_SD, lsd=LINEAGE_SD, srw=1.0, lr_test=0.0,
+         holdout_region=None):
     if composition_tsv == "-":
         composition_tsv = None
     out = Path(out_dir)
@@ -116,10 +119,12 @@ def main(pkl, out_dir, ct_sd=1.0, composition_tsv=None, tau=TAU, rsd=REGION_SD, 
     names, tx_len, unspliced = z["names"], z["tx_len"], z["unspliced"]
     groups = z["groups"].set_index("group")
     sr_keys = sorted(z["sr"])
-    lr_keys = sorted(z["lr"])
     lr_tissue = z["files"].set_index("accession")["tissue"]
+    lr_keys = sorted(a for a in z["lr"] if lr_tissue[a] != holdout_region)
     tpm, summary = {}, []
-    test = {}
+    test = {a: z["lr"][a] for a in sorted(z["lr"]) if lr_tissue[a] == holdout_region}
+    if holdout_region is not None and not test:
+        raise ValueError(f"no bulk long-read libraries of region {holdout_region}")
     if float(lr_test) > 0:
         for j, a in enumerate(lr_keys):
             z["lr"][a], test[a] = split_library(z["lr"][a], float(lr_test), seed=j)
@@ -162,15 +167,20 @@ def main(pkl, out_dir, ct_sd=1.0, composition_tsv=None, tau=TAU, rsd=REGION_SD, 
     fixed = None
     if composition_tsv is not None:
         fixed = pd.read_csv(composition_tsv, sep="\t").set_index("unit")["weight"]
-    for j, a in enumerate(lr_keys):
-        l = len(sr_keys) + j
+    def comp_row(a):
+        """Mixture weights over all units of bulk library a: its region's base units (composition or uniform)."""
+        row = np.zeros(K)
         allowed = [i for i, (r, _) in enumerate(base_units) if r == lr_tissue[a]]
-        composition[l] = allowed
         if fixed is None:
-            pi[l, allowed] = 1.0 / len(allowed)
+            row[allowed] = 1.0 / len(allowed)
         else:
             w = fixed.reindex([f"{r}|{c}" for r, c in (base_units[i] for i in allowed)]).fillna(0.0).to_numpy()
-            pi[l, allowed] = w / w.sum()
+            row[allowed] = w / w.sum()
+        return row, allowed
+
+    for j, a in enumerate(lr_keys):
+        l = len(sr_keys) + j
+        pi[l], composition[l] = comp_row(a)
     X, sd, cols = design(base_units, ct_sd, float(rsd), float(lsd))
     em = JointEM(libs, pi=pi, pool="design_gene", design=X, design_sd=sd, base=base, groups=z["gene_groups"],
                  scale_groups=scale_groups, pool_tau=float(tau), design_inner=3,
@@ -205,14 +215,17 @@ def main(pkl, out_dir, ct_sd=1.0, composition_tsv=None, tau=TAU, rsd=REGION_SD, 
     pd.DataFrame(summary).to_csv(out / "fits.tsv", sep="\t", index=False)
     pd.DataFrame(tpm, index=names).to_csv(out / "tpm.tsv.gz", sep="\t", float_format="%.6g")
     if test:
-        tlibs = [test[a] for a in lr_keys]
-        bulk_pi = np.zeros((len(lr_keys), len(tissues)))
-        bulk_pi[np.arange(len(lr_keys)), [tissues.index(lr_tissue[a]) for a in lr_keys]] = 1.0
-        jb = heldout_logprobs(tlibs, em.pi[len(sr_keys):], res.theta, tm, z["gene_groups"],
-                              "molecules" if fixed is None else "reads")
-        lb = heldout_logprobs(tlibs, bulk_pi, res_lr.theta, tm_lr, z["gene_groups"], "molecules")
+        tkeys = sorted(test)
+        tlibs = [test[a] for a in tkeys]
+        # the composition used in fitting (estimated by the EM for trained libraries without a fixed composition)
+        trained = {a: em.pi[len(sr_keys) + j] for j, a in enumerate(lr_keys)}
+        tpi = np.stack([trained[a] if a in trained else comp_row(a)[0] for a in tkeys])
+        jb = heldout_logprobs(tlibs, tpi, res.theta, tm, z["gene_groups"], "molecules" if fixed is None else "reads")
+        btheta = np.stack([res_lr.theta[tissues.index(lr_tissue[a])] if lr_tissue[a] in tissues
+                           else res_lr.theta.mean(axis=0) for a in tkeys])
+        lb = heldout_logprobs(tlibs, np.eye(len(tkeys)), btheta, tm_lr, z["gene_groups"], "molecules")
         arrays = {}
-        for j, a in enumerate(lr_keys):
+        for j, a in enumerate(tkeys):
             arrays[f"{a}|counts"] = jb[2][j]
             for name, (all_, within, _) in (("joint", jb), ("LR_bulk", lb)):
                 arrays[f"{a}|{name}|all"] = all_[j]
