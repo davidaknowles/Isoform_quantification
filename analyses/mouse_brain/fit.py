@@ -24,7 +24,7 @@ one spliced isoform each, x SR group), composition.tsv, fits.tsv.
 
 Options as key=value after the positional arguments: tau (unit noise sd, default TAU), rsd and lsd (region and
 lineage effect sds, default REGION_SD, LINEAGE_SD) and srw (SR counts multiplied by srw, tempering the short-read
-likelihood against the long reads; default 1), lr_test (a fraction of each bulk long-read library's molecules held
+likelihood against the long reads; default SR_WEIGHT), lr_test (a fraction of each bulk long-read library's molecules held
 out by binomial thinning, fixed seed; default 0) and holdout_region (all bulk long-read libraries of that region left
 out of every fit and scored afterwards: leave-one-region-out). Strong class shrinkage (small ct_sd and lsd) and srw < 1 were needed
 on PBMC (analyses/pbmc_ss2/predict_kinnex.py).
@@ -53,6 +53,9 @@ from joli.paf import split_library
 LINEAGE = {"neuron": "neuron", "astrocyte": "glia", "oligodendrocyte": "glia", "OPC": "glia", "microglia": "immune",
            "endothelial": "vascular", "pericyte": "vascular"}
 TAU = 1.0
+# short-read count weight: tempering SR against the long reads; 0.3 had the best agreement with the single-cell long-read
+# truth in the mouse-brain weight grids (held-out bulk long reads do not select it; LABNOTEBOOK 2026-11-21/22)
+SR_WEIGHT = 0.3
 REGION_SD, LINEAGE_SD = 2.0, 2.0
 RUN_KW = dict(max_iter=20000, ll_rel_tol=1e-10)
 
@@ -109,7 +112,7 @@ def heldout_logprobs(libs, pi, theta, tm, gene_groups, mixture):
     return em.ec_logprob(theta), em.ec_logprob(theta, groups=gene_groups), [fl.counts for fl in em.libs]
 
 
-def main(pkl, out_dir, ct_sd=1.0, composition_tsv=None, tau=TAU, rsd=REGION_SD, lsd=LINEAGE_SD, srw=1.0, lr_test=0.0,
+def main(pkl, out_dir, ct_sd=1.0, composition_tsv=None, tau=TAU, rsd=REGION_SD, lsd=LINEAGE_SD, srw=SR_WEIGHT, lr_test=0.0,
          holdout_region=None):
     if composition_tsv == "-":
         composition_tsv = None
