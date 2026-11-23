@@ -321,6 +321,20 @@ Scoring (within-gene isoform fractions, genes with ≥ 20 truth UMIs on ≥ 2 tr
 
 At a typical gene the truth's cell-type differences are as small as replicate noise (0.040 vs 0.037), while every estimate is 0.10–0.18 away: the gene-TV score measures platform and protocol agreement (bulk PacBio vs 10x ScISOr-Seq2 vs Smart-seq2), which the cell-type-agnostic LR_bulk wins. Specificity is the mean, over other classes c', of TV(estimate of c', truth c) − TV(estimate of c, truth c). Differential isoform usage (DIU) restricts to genes where a class's truth differs from the mean of the region's other classes by gene TV ≥ 0.2 (≥ 100 UMIs in each) and correlates Δψ = ψ(class) − mean ψ(other classes) between estimate and truth. On these genes the joint consensus captures cell-type isoform differences (median r 0.67; LR_bulk has none by construction). The joint base units fail exactly where composition absorbed the bulk (cortex OPC r = −0.03, hippocampus astrocyte r = −0.45); the consensus profile avoids this.
 
+### 2026-11-22 Leave-one-region-out: hippocampus bulk long reads held out
+
+`fit.py holdout_region=Hippocampus`: the hippocampus ENCODE libraries are left out of LR_bulk and the joint fit; hippocampus base units are informed by their Smart-seq2 groups, the class and lineage effects shared with cortex, and the prior. All hippocampus bulk molecules are scored under the hippocampus mixture (deconvolved composition, read-end model fitted on cortex) and under the cortex bulk profile (baseline). Default prior, SR weight grid; truth scores for the hippocampus consensus units:
+
+| SR weight | held-out bulk LR all / within gene (vs cortex profile) | Joglekar hippocampus DIU Δψ r | sign agreement | gene TV |
+|---|---|---|---|---|
+| 1 | −1.72 / −0.267 | 0.674 | 0.874 | 0.151 |
+| 0.3 | −1.85 / −0.247 | 0.716 | 0.874 | 0.154 |
+| 0.1 | −1.92 / −0.224 | 0.713 | 0.868 | 0.156 |
+| 0.03 | −2.32 / −0.199 | 0.710 | 0.868 | 0.156 |
+| 0.01 | −2.59 / −0.180 | 0.706 | 0.848 | 0.149 |
+
+The two held-out scores pull opposite ways (all, dominated by gene level, prefers weight 1; within gene prefers 0.01), while the truth's cell-type differences are best and flat for weights 0.03–0.3. Without hippocampus bulk the hippocampus units' DIU is higher than with it (0.71 vs 0.665), consistent with bulk mixture fitting pulling units. For predicting a nearby region's bulk molecules, the cortex bulk profile beats every joint fit by far (−1.7 nats per molecule), but it has no cell-type resolution. Neither held-out bulk score selects the weight the truth prefers; across the brain runs the truth points to a weight of about 0.1–0.3 under the default prior.
+
 ### 2026-11-21 Choosing the SR weight by held-out bulk long reads does not work
 
 `fit.py lr_test=0.1` holds out 10% of each ENCODE bulk library's molecules (binomial thinning of EC counts, fixed seed, `joli.paf.split_library`) and scores them under the joint mixture and LR_bulk; `select_srw.py` compares runs on common ECs. Default prior, composition from gene-level SR profiles (estimated on all long reads), SR weight grid:
