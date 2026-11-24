@@ -26,7 +26,11 @@ Options as key=value after the positional arguments: tau (unit noise sd, default
 lineage effect sds, default REGION_SD, LINEAGE_SD) and srw (SR counts multiplied by srw, tempering the short-read
 likelihood against the long reads; default SR_WEIGHT), lr_test (a fraction of each bulk long-read library's molecules held
 out by binomial thinning, fixed seed; default 0) and holdout_region (all bulk long-read libraries of that region left
-out of every fit and scored afterwards: leave-one-region-out). Strong class shrinkage (small ct_sd and lsd) and srw < 1 were needed
+out of every fit and scored afterwards: leave-one-region-out), holdout_donor (the same for all bulk libraries of one
+donor, files.tsv donor column) and composition_by (tissue: one composition per tissue from composition.tsv, the
+default; library: each bulk library's composition by gene-level deconvolution of its own single-gene-EC long-read counts
+against the SR gene profiles of its tissue's classes, so libraries of one tissue with different cell mixtures, e.g.
+heart chambers, get their own weights). Strong class shrinkage (small ct_sd and lsd) and srw < 1 were needed
 on PBMC (analyses/pbmc_ss2/predict_kinnex.py).
 
 With lr_test or holdout_region, the held-out molecules are scored under the joint fit (each library's mixture of its
@@ -45,7 +49,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from joli.deconv import single_gene_counts
+from joli.deconv import mixture_weights, single_gene_counts
 from joli.joint import JointEM, molar_to_tpm
 from joli.lr_bias import AnchoredTruncationModel, FragmentModel, bias_weights, fit_bias
 from joli.paf import split_library
@@ -103,6 +107,28 @@ def scaled(lib, w):
     return out
 
 
+def library_compositions(z, srg, groups, sr_keys, base_units, lr_tissue, keys):
+    """
+    {library: {base unit: weight}} by gene-level deconvolution of each bulk library: reads in its ECs whose targets
+    are all spliced isoforms of one gene, against the mean SR gene profile of each class of its tissue (srg columns).
+    """
+    gene = np.where(z["unspliced"], -1, z["genes"])
+    sp = gene >= 0
+    first = pd.Series(np.flatnonzero(sp)).groupby(gene[sp]).first()
+    out = {}
+    for a in keys:
+        units = [u for u in base_units if u[0] == lr_tissue[a]]
+        ref = np.stack([srg[[g for g in sr_keys if (groups.loc[g, "region"], groups.loc[g, "cell_class"]) == u]].mean(axis=1)
+                        .to_numpy() for u in units])
+        ecs = z["lr"][a].tcc.ec_transcripts
+        y = single_gene_counts(ecs.ptr, ecs.values, z["lr"][a].tcc.ec_counts, gene, int(gene.max()) + 1)[first.index]
+        keep = ref.sum(axis=0) > 0
+        w, _ = mixture_weights(y[keep], ref[:, keep])
+        out[a] = dict(zip(units, w))
+        print(f"composition {a} ({lr_tissue[a]}): " + ", ".join(f"{u[1]} {v:.3f}" for u, v in zip(units, w)), flush=True)
+    return out
+
+
 def heldout_logprobs(libs, pi, theta, tm, gene_groups, mixture):
     """Per-EC log-probabilities (all, within gene) and counts of held-out libraries at fixed abundances."""
     em = JointEM(libs, pi=pi, mixture=mixture)
@@ -113,7 +139,7 @@ def heldout_logprobs(libs, pi, theta, tm, gene_groups, mixture):
 
 
 def main(pkl, out_dir, ct_sd=1.0, composition_tsv=None, tau=TAU, rsd=REGION_SD, lsd=LINEAGE_SD, srw=SR_WEIGHT, lr_test=0.0,
-         holdout_region=None):
+         holdout_region=None, holdout_donor=None, composition_by="tissue"):
     if composition_tsv == "-":
         composition_tsv = None
     out = Path(out_dir)
@@ -123,11 +149,13 @@ def main(pkl, out_dir, ct_sd=1.0, composition_tsv=None, tau=TAU, rsd=REGION_SD, 
     groups = z["groups"].set_index("group")
     sr_keys = sorted(z["sr"])
     lr_tissue = z["files"].set_index("accession")["tissue"]
-    lr_keys = sorted(a for a in z["lr"] if lr_tissue[a] != holdout_region)
+    lr_donor = z["files"].set_index("accession")["donor"]
+    held = lambda a: lr_tissue[a] == holdout_region or lr_donor[a] == holdout_donor
+    lr_keys = sorted(a for a in z["lr"] if not held(a))
     tpm, summary = {}, []
-    test = {a: z["lr"][a] for a in sorted(z["lr"]) if lr_tissue[a] == holdout_region}
-    if holdout_region is not None and not test:
-        raise ValueError(f"no bulk long-read libraries of region {holdout_region}")
+    test = {a: z["lr"][a] for a in sorted(z["lr"]) if held(a)}
+    if (holdout_region is not None or holdout_donor is not None) and not test:
+        raise ValueError("no bulk long-read libraries to hold out")
     if float(lr_test) > 0:
         for j, a in enumerate(lr_keys):
             z["lr"][a], test[a] = split_library(z["lr"][a], float(lr_test), seed=j)
@@ -141,7 +169,8 @@ def main(pkl, out_dir, ct_sd=1.0, composition_tsv=None, tau=TAU, rsd=REGION_SD, 
         return fms
 
     # SR gene-level profiles (no isoform-level estimation)
-    sr_genes(z, sr_keys).to_csv(out / "sr_genes.tsv.gz", sep="\t", float_format="%.6g")
+    srg = sr_genes(z, sr_keys)
+    srg.to_csv(out / "sr_genes.tsv.gz", sep="\t", float_format="%.6g")
 
     # bulk LR alone: one unit per tissue
     t0 = time.time()
@@ -170,11 +199,23 @@ def main(pkl, out_dir, ct_sd=1.0, composition_tsv=None, tau=TAU, rsd=REGION_SD, 
     fixed = None
     if composition_tsv is not None:
         fixed = pd.read_csv(composition_tsv, sep="\t").set_index("unit")["weight"]
+    libcomp = {}
+    if composition_by == "library":
+        libcomp = library_compositions(z, srg, groups, sr_keys, base_units, lr_tissue, list(lr_keys) + sorted(test))
+        pd.DataFrame([{"library": a, "tissue": lr_tissue[a], "unit": f"{u[0]}|{u[1]}", "weight": w}
+                      for a, d in libcomp.items() for u, w in d.items()]).to_csv(out / "library_composition.tsv",
+                                                                                 sep="\t", index=False)
+        fixed = True                                     # fixed weights (read shares), no EM composition
+    mode = "molecules" if fixed is None else "reads"
+
     def comp_row(a):
         """Mixture weights over all units of bulk library a: its region's base units (composition or uniform)."""
         row = np.zeros(K)
         allowed = [i for i, (r, _) in enumerate(base_units) if r == lr_tissue[a]]
-        if fixed is None:
+        if libcomp:
+            row[allowed] = [libcomp[a].get(base_units[i], 0.0) for i in allowed]
+            row /= row.sum()
+        elif fixed is None:
             row[allowed] = 1.0 / len(allowed)
         else:
             w = fixed.reindex([f"{r}|{c}" for r, c in (base_units[i] for i in allowed)]).fillna(0.0).to_numpy()
@@ -187,7 +228,7 @@ def main(pkl, out_dir, ct_sd=1.0, composition_tsv=None, tau=TAU, rsd=REGION_SD, 
     X, sd, cols = design(base_units, ct_sd, float(rsd), float(lsd))
     em = JointEM(libs, pi=pi, pool="design_gene", design=X, design_sd=sd, base=base, groups=z["gene_groups"],
                  scale_groups=scale_groups, pool_tau=float(tau), design_inner=3,
-                 mixture="molecules" if fixed is None else "reads")
+                 mixture=mode)
     frag = frag_models(sr_keys)
     tm = AnchoredTruncationModel(tx_len, uniform=unspliced)
     trunc = {len(sr_keys) + j: tm for j in range(len(lr_keys))}
@@ -223,7 +264,7 @@ def main(pkl, out_dir, ct_sd=1.0, composition_tsv=None, tau=TAU, rsd=REGION_SD, 
         # the composition used in fitting (estimated by the EM for trained libraries without a fixed composition)
         trained = {a: em.pi[len(sr_keys) + j] for j, a in enumerate(lr_keys)}
         tpi = np.stack([trained[a] if a in trained else comp_row(a)[0] for a in tkeys])
-        jb = heldout_logprobs(tlibs, tpi, res.theta, tm, z["gene_groups"], "molecules" if fixed is None else "reads")
+        jb = heldout_logprobs(tlibs, tpi, res.theta, tm, z["gene_groups"], mode)
         btheta = np.stack([res_lr.theta[tissues.index(lr_tissue[a])] if lr_tissue[a] in tissues
                            else res_lr.theta.mean(axis=0) for a in tkeys])
         lb = heldout_logprobs(tlibs, np.eye(len(tkeys)), btheta, tm_lr, z["gene_groups"], "molecules")
