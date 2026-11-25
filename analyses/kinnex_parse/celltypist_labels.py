@@ -5,7 +5,8 @@ Majority voting runs over a PCA + k-means over-clustering (~25 cells per cluster
 
 Needs the CellTypist venv (Python 3.12 module loaded).
 
-Run: python analyses/kinnex_parse/celltypist_labels.py <molecules_dir> <out.tsv> [min_umis]
+Run: python analyses/kinnex_parse/celltypist_labels.py <molecules_dir> <out.tsv> [min_umis] [model]
+     (model: a CellTypist model name, default Immune_All_Low.pkl; e.g. Mouse_Isocortex_Hippocampus.pkl)
 """
 
 import sys
@@ -21,7 +22,7 @@ import scipy.sparse as sp
 from sklearn.cluster import MiniBatchKMeans
 
 
-def main(mdir, out, min_umis=200):
+def main(mdir, out, min_umis=200, model="Immune_All_Low.pkl"):
     mdir = Path(mdir)
     # scanpy here needs the spmatrix API (newer scipy returns csr_array from mmread)
     X = sp.csr_matrix(scipy.io.mmread(mdir / "counts.mtx")).astype(np.float32)
@@ -38,7 +39,8 @@ def main(mdir, out, min_umis=200):
     pca = sc.pp.pca(ad, n_comps=50, copy=True).obsm["X_pca"]
     k = max(2, ad.n_obs // 25)
     clusters = MiniBatchKMeans(n_clusters=k, random_state=0, n_init=3).fit_predict(pca)
-    pred = celltypist.annotate(ad, model="Immune_All_Low.pkl", majority_voting=True,
+    celltypist.models.download_models(model=model)
+    pred = celltypist.annotate(ad, model=model, majority_voting=True,
                                over_clustering=clusters.astype(str))
     lab = pred.predicted_labels
     res = pd.DataFrame({"cell": ad.obs_names, "umis": ad.obs["umis"].to_numpy(),
@@ -49,4 +51,4 @@ def main(mdir, out, min_umis=200):
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:4])
+    main(*sys.argv[1:5])
