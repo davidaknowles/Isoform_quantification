@@ -321,6 +321,17 @@ Scoring (within-gene isoform fractions, genes with ≥ 20 truth UMIs on ≥ 2 tr
 
 At a typical gene the truth's cell-type differences are as small as replicate noise (0.040 vs 0.037), while every estimate is 0.10–0.18 away: the gene-TV score measures platform and protocol agreement (bulk PacBio vs 10x ScISOr-Seq2 vs Smart-seq2), which the cell-type-agnostic LR_bulk wins. Specificity is the mean, over other classes c', of TV(estimate of c', truth c) − TV(estimate of c, truth c). Differential isoform usage (DIU) restricts to genes where a class's truth differs from the mean of the region's other classes by gene TV ≥ 0.2 (≥ 100 UMIs in each) and correlates Δψ = ψ(class) − mean ψ(other classes) between estimate and truth. On these genes the joint consensus captures cell-type isoform differences (median r 0.67; LR_bulk has none by construction). The joint base units fail exactly where composition absorbed the bulk (cortex OPC r = −0.03, hippocampus astrocyte r = −0.45); the consensus profile avoids this.
 
+### 2026-11-24 Tabula Sapiens: held-out heart donors, tissue vs per-library composition
+
+`fit.py holdout_donor=<donor>`: all heart PacBio libraries of one donor left out of LR_bulk and the joint fit (SR weight 0.3), then scored under the joint heart mixture and under the heart bulk profile of the other donors. `composition_by=library`: each bulk library's composition by gene-level deconvolution of its own single-gene-EC long-read counts against the Smart-seq2 class profiles (held-out libraries included, so their gene-level counts enter their weights). Per-library compositions follow chamber anatomy: atria fibroblast 0.19–0.23, endothelial 0.11–0.15; ventricles and septum fibroblast 0.04–0.17, endothelial 0.13–0.27; cardiomyocytes 0.45–0.60.
+
+| held-out donor | per-library composition all / within gene | tissue composition all / within gene |
+|---|---|---|
+| ENCDO856ZOJ (LV, LA, RA, RV) | +0.0118 / −0.0013 | −0.0034 / −0.0015 |
+| ENCDO520EJG (RA + 4 ventricular) | +0.0112 / −0.0013 | −0.0004 / −0.0010 |
+
+Gain per held-out molecule over the heart bulk profile. Per-library composition improves prediction overall (partly through the held-out libraries' own gene counts in their weights), while a single heart composition matches the baseline; within gene every joint variant is about 0.001 below the pooled heart profile. Chamber differences in cell mixture are predicted at gene level but give no within-gene (isoform) gain, as in PBMC: bulk long reads here show little cell-type isoform signal beyond the pooled tissue profile.
+
 ### 2026-11-23 Atlas default SR weight 0.3: reference refits
 
 `fit.py` default `SR_WEIGHT = 0.3`. Mouse brain, all data, default prior, composition from gene-level SR profiles (cortex 92% neuron, hippocampus 68%): converged in 2,247 steps (5 h). Against Joglekar: consensus gene TV 0.148, specificity 0.006, DIU Δψ r 0.668, sign agreement 0.808; base units 0.155 / 0.014 / 0.596 / 0.788 (full SR weight: consensus 0.665 / 0.823, units 0.631 / 0.811). The consensus profile is the estimate to report at this weight. Tabula Sapiens muscle + heart (2% of SR fragments, deconvolved composition) converged in 5,622 steps (5 h); evaluation pending (no single-cell isoform truth for these tissues).

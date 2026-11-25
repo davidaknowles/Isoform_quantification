@@ -49,6 +49,7 @@ Done
 
 Open
 - Platform/protocol differences dominate absolute isoform-fraction error (every estimate 0.10–0.18 median gene TV from the truth vs 0.04 replicate noise).
+- Tabula Sapiens held-out heart donors: per-library composition (chamber mixtures) beats the pooled heart profile overall (+0.011 nats per molecule, partly from the held-out libraries' gene counts) but not within gene (−0.001); no isoform gain from cell-type resolution in bulk heart LR.
 - Tabula Sapiens pilot (muscle TSP4, heart TSP12 Smart-seq2; ENCODE4 psoas and heart PacBio, 19 libraries aligned): groups built, SR reads blocked (S3 objects need credentials; lab access via Karin). Allen human cortex (data use agreement unconfirmed).
 
 ## Engineering
