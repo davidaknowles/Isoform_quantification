@@ -321,6 +321,20 @@ Scoring (within-gene isoform fractions, genes with ≥ 20 truth UMIs on ≥ 2 tr
 
 At a typical gene the truth's cell-type differences are as small as replicate noise (0.040 vs 0.037), while every estimate is 0.10–0.18 away: the gene-TV score measures platform and protocol agreement (bulk PacBio vs 10x ScISOr-Seq2 vs Smart-seq2), which the cell-type-agnostic LR_bulk wins. Specificity is the mean, over other classes c', of TV(estimate of c', truth c) − TV(estimate of c, truth c). Differential isoform usage (DIU) restricts to genes where a class's truth differs from the mean of the region's other classes by gene TV ≥ 0.2 (≥ 100 UMIs in each) and correlates Δψ = ψ(class) − mean ψ(other classes) between estimate and truth. On these genes the joint consensus captures cell-type isoform differences (median r 0.67; LR_bulk has none by construction). The joint base units fail exactly where composition absorbed the bulk (cortex OPC r = −0.03, hippocampus astrocyte r = −0.45); the consensus profile avoids this.
 
+### 2026-11-25 Same-cell Parse SR + ONT LR (IGVF mouse cortex): short reads help held-out long reads
+
+Data: IGVF B01_13H left cortex subpool (Loving, Sullivan, Reese et al.; open access): Parse Evercode WT v2 Illumina and ONT R10 reads of the same nuclei, 8 mice (4 B6J, 4 CAST/EiJ) multiplexed by round-1 well. Short reads: salmon/alevin-fry `--splitseqV2` with knee cell calling to GENCODE vM37 spliced + unspliced targets (`analyses/igvf_cortex/sr_align.sh`); cells = round-1 well × round-2 × round-3 indices, so a well's oligo-dT and random-hexamer barcodes form one cell; B6J nuclei with ≥ 500 SR UMIs kept (5,687; the reference is GRCm39); CellTypist Mouse_Isocortex_Hippocampus labels (13 types with ≥ 100 cells, L4/5 IT 1,721 to L2/3 IT PPP 113). Long reads: Parse WT v2 barcodes called in ONT reads with tealeaf's long-read caller given the WT v2 linkers (22 and 30 nt; whitelists and linkers in Illumina read-2 orientation), 38–42% of reads called (most others carry no linker at either end); minimap2 map-ont; one read per molecule: 7.56M molecules in these cells, median 1,070 gene-unique molecules per cell (`ont_barcodes.py`, `run.sh`). Evaluation with the PBMC held-out pipeline (`heldout_lr.py`, `heldout_rescore.py`): 10% of each cell type's ONT molecules held out, training on 5%, 25% or 90% of the rest.
+
+Unsmoothed gain per held-out molecule over LR_design (the same design prior without short reads; common molecules 98–99% of the held-out set):
+
+| fit | 5% all / within gene | 25% | 90% |
+|---|---|---|---|
+| joint (one profile per cell type, all bias models) | +0.101 / +0.033 | +0.032 / +0.005 | +0.014 / +0.002 |
+| joint_dgene (design prior on LR units, SR rescaled per gene) | +0.037 / +0.026 | +0.015 / +0.008 | +0.012 / +0.006 |
+| joint_gene (platform gene totals, shared fractions, no prior) | −2.32 / −0.51 | −0.68 / −0.23 | −0.18 / −0.07 |
+
+Against LR alone on molecules it can score (86–98% of the held-out set), at 90% training joint_dgene gains +0.013 overall and +0.009 within gene, against +0.003 / +0.004 for LR_design; at 5% all fits lose there, but that comparison drops the 14% of molecules on transcripts the training long reads never saw, where short-read coverage matters most. With short and long reads from the same cells, short reads improve held-out long-read prediction beyond cross-cell-type sharing at every long-read depth, most when long reads are sparse; in the Parse/Kinnex PBMC data (different donors) they never did. joint_gene has no prior and leaves near-zero probability on transcripts unseen in training.
+
 ### 2026-11-25 SR weight chosen on one single-cell truth replicate, scored on the other
 
 `evaluate.py` now also scores DIU against each Joglekar replicate mouse (M1, M2; evaluation_diu_replicates.tsv). Joint consensus, median Δψ r over region × class (hippocampus-held-out runs: hippocampus units only):

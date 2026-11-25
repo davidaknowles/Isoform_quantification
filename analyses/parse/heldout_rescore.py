@@ -12,7 +12,11 @@ are built once.
 
 Writes <heldout_dir>/rescore.tsv (fraction x fit x score x library) and rescore_summary.tsv.
 
-Run: python analyses/parse/heldout_rescore.py <sr_series_dirs> <lr_dirs> <ref_dir> <heldout_dir> [test_fraction] [min_cells]
+With a reference other than LR (e.g. LR_design_ct0.5), fits whose names start with "LR" except the reference are left
+out, so the common molecules include those LR alone gives zero probability (transcripts its training molecules never
+saw); outputs then get the suffix _<reference>.
+
+Run: python analyses/parse/heldout_rescore.py <sr_series_dirs> <lr_dirs> <ref_dir> <heldout_dir> [test_fraction] [min_cells] [reference]
 """
 
 import pickle
@@ -54,7 +58,7 @@ def fit_logprobs(fit, test_libs, keys, genes):
     return em.ec_logprob(fit["theta"]), em.ec_logprob(fit["theta"], groups=genes), [fl.counts for fl in em.libs]
 
 
-def main(sr_dirs, kdir, ref_dir, heldout_dir, test_fraction=0.1, min_cells=100):
+def main(sr_dirs, kdir, ref_dir, heldout_dir, test_fraction=0.1, min_cells=100, reference="LR"):
     hd = Path(heldout_dir)
     ctx = jc.prepare(sr_dirs, kdir, ref_dir, min_cells)
     names, tx_len, unspliced = ctx["names"], ctx["tx_len"], ctx["unspliced"]
@@ -71,7 +75,9 @@ def main(sr_dirs, kdir, ref_dir, heldout_dir, test_fraction=0.1, min_cells=100):
             with open(f, "rb") as fh:
                 for name, fit in pickle.load(fh)["fits"].items():
                     fits.setdefault(name, fit)            # joint is saved by several jobs: keep one
-        if "LR" not in fits:
+        if reference != "LR":
+            fits = {n: f for n, f in fits.items() if n == reference or not n.startswith("LR")}
+        if reference not in fits:
             continue
         keys = sorted(k for k in test if all(label_fn(f["present"])(k) in set(f["present"]) for f in fits.values()))
         lp = {}
@@ -83,24 +89,25 @@ def main(sr_dirs, kdir, ref_dir, heldout_dir, test_fraction=0.1, min_cells=100):
         for score, idx in [("all", 0), ("within_gene", 1)]:
             for l, k in enumerate(keys):
                 ok = np.logical_and.reduce([np.isfinite(lp[n][idx][l]) for n in lp])
-                n_all = counts[l][~np.isnan(lp["LR"][idx][l])].sum()
+                n_all = counts[l][~np.isnan(lp[reference][idx][l])].sum()
                 for name in lp:
                     rows.append({"lr_train_fraction": float(frac), "fit": name, "score": score, "library": k,
                                  "unit": k.split("|")[0], "molecules": counts[l][ok].sum(), "molecules_scorable": n_all,
                                  "ll": counts[l][ok] @ lp[name][idx][l][ok]})
         del lp
     r = pd.DataFrame(rows)
-    r.to_csv(hd / "rescore.tsv", sep="\t", index=False)
-    lr = r[r.fit == "LR"].set_index(["lr_train_fraction", "score", "library"])["ll"]
+    sfx = "" if reference == "LR" else f"_{reference}"
+    r.to_csv(hd / f"rescore{sfx}.tsv", sep="\t", index=False)
+    lr = r[r.fit == reference].set_index(["lr_train_fraction", "score", "library"])["ll"]
     r["gain"] = r["ll"] - lr.reindex(pd.MultiIndex.from_frame(r[["lr_train_fraction", "score", "library"]])).to_numpy()
     s = r.groupby(["score", "fit", "lr_train_fraction"]).agg(gain=("gain", "sum"), molecules=("molecules", "sum"),
                                                               scorable=("molecules_scorable", "sum")).reset_index()
     s["gain_per_molecule"] = s["gain"] / s["molecules"]
     s["share_scored"] = s["molecules"] / s["scorable"]
-    s.to_csv(hd / "rescore_summary.tsv", sep="\t", index=False)
+    s.to_csv(hd / f"rescore_summary{sfx}.tsv", sep="\t", index=False)
     print(s.pivot_table(index="fit", columns=["score", "lr_train_fraction"], values="gain_per_molecule").round(4).to_string())
     print(s.pivot_table(index="score", columns="lr_train_fraction", values="share_scored", aggfunc="first").round(4).to_string())
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:5], *(float(x) if i == 0 else int(x) for i, x in enumerate(sys.argv[5:7])))
+    main(*sys.argv[1:5], *(float(x) if i == 0 else int(x) for i, x in enumerate(sys.argv[5:7])), *sys.argv[7:8])
