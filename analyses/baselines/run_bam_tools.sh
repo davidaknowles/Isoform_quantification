@@ -3,11 +3,12 @@
 #   oarfish   (v0.13.0) two settings: the published recommendation (--filter-group no-filters
 #             --model-coverage) and the learned read-placement mixture (--model-truncation).
 #             (--short-quant only seeds the EM start, so no hybrid oarfish run.)
-#   nanocount (NanoCount 1.1.0.post2) default filters
+#   nanocount (NanoCount 1.1.0.post2) default filters, keeping negative-strand alignments (-n, for
+#             cDNA; the default discards them, as for direct RNA)
 # One array task per long-read run (see common.sh, 12 tasks); the first argument picks the tool.
 #
 # Run: sbatch --array=1-12 analyses/baselines/run_bam_tools.sh oarfish
-#      sbatch --array=1-12 --mem=160G -t 72:00:00 analyses/baselines/run_bam_tools.sh nanocount
+#      sbatch --array=1-12 -c 4 --mem=160G -t 72:00:00 analyses/baselines/run_bam_tools.sh nanocount
 #SBATCH -J bl_bam
 #SBATCH -p cpu
 #SBATCH -c 16
@@ -35,7 +36,7 @@ case $tool in
     source $VENV/bin/activate
     NanoCount --version
     SECONDS=0
-    NanoCount -i $bam -o $out.tsv -x
+    NanoCount -i $bam -o $out.tsv -x -n
     echo "nanocount $name: $SECONDS s"
     ;;
 esac

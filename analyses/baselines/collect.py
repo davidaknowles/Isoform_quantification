@@ -79,6 +79,7 @@ def read_isoquant(d, name):
 
 def read_miniquant(p):
     df = pd.read_csv(p, sep="\t", index_col=0)
+    df.index = df.index.str.split().str[0]  # miniQuant keeps the whole FASTA header
     return df["TPM"].astype(float)
 
 
