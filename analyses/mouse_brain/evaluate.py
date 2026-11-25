@@ -12,6 +12,9 @@ specificity margin, the mean over other classes c' of median TV(estimate of c', 
 of c, truth c) on genes scorable for both (positive: the class's own estimate fits its truth better; 0 for
 LR_bulk by construction).
 
+evaluation_diu_replicates.tsv repeats it against each truth replicate (M1, M2) separately, so a fit option can be
+chosen on one replicate and scored on the other.
+
 Third table (evaluation_diu.tsv), differential isoform usage: per region x class, genes whose truth isoform
 fractions differ from the mean over the region's other classes by gene TV >= DIU_TV (truth >= DIU_UMI UMIs in the
 class and in each other class used); Pearson over their transcripts of delta psi (class - mean of other classes)
@@ -76,6 +79,8 @@ def main(fit_dir, truth_path, ref_dir):
     print(c.pivot_table(index=["region", "cell_class"], columns="estimate", values="tv").round(3).to_string())
     print(c.groupby("estimate")[["tv", "specificity", "genes"]].median().round(4).to_string())
     d = diu(tpm, truth, gene)
+    reps = pd.concat([diu(tpm, truth, gene, r).assign(replicate=r) for r in ("M1", "M2")], ignore_index=True)
+    reps.to_csv(fd / "evaluation_diu_replicates.tsv", sep="\t", index=False)
     d.to_csv(fd / "evaluation_diu.tsv", sep="\t", index=False)
     print(d.pivot_table(index=["region", "cell_class"], columns="estimate", values="dpsi_pearson").round(3).to_string())
     tot = d.groupby("estimate").apply(lambda x: pd.Series({"dpsi_pearson_median": x.dpsi_pearson.median(),
@@ -84,7 +89,7 @@ def main(fit_dir, truth_path, ref_dir):
     print(tot.round(3).to_string())
 
 
-def diu(tpm, truth, gene):
+def diu(tpm, truth, gene, rep="all"):
     """Differential isoform usage of each class against the mean of the region's other classes."""
     idx = truth.index.intersection(tpm.index)
     tpm, truth, g = tpm.reindex(idx), truth.reindex(idx), gene.reindex(idx)
@@ -93,7 +98,8 @@ def diu(tpm, truth, gene):
     for region in sorted({c.split("|")[0] for c in truth.columns if c.endswith("|all")}):
         classes = [c.split("|")[1] for c in truth.columns if c.endswith("|all") and c.startswith(region + "|")]
         est = {cls: estimates(tpm, region, cls) for cls in classes}
-        tcol = {cls: truth[f"{region}|{cls}|all"] for cls in classes}
+        tcol = {cls: truth[f"{region}|{cls}|{rep}"] for cls in classes if f"{region}|{cls}|{rep}" in truth}
+        classes = list(tcol)
         tg = {cls: tcol[cls].groupby(g).transform("sum") for cls in classes}
         tpsi = {cls: tcol[cls] / tg[cls].replace(0, np.nan) for cls in classes}
         epsi = {cls: {n: e / e.groupby(g).transform("sum").replace(0, np.nan) for n, e in est[cls].items()}

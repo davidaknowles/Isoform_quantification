@@ -321,6 +321,19 @@ Scoring (within-gene isoform fractions, genes with ≥ 20 truth UMIs on ≥ 2 tr
 
 At a typical gene the truth's cell-type differences are as small as replicate noise (0.040 vs 0.037), while every estimate is 0.10–0.18 away: the gene-TV score measures platform and protocol agreement (bulk PacBio vs 10x ScISOr-Seq2 vs Smart-seq2), which the cell-type-agnostic LR_bulk wins. Specificity is the mean, over other classes c', of TV(estimate of c', truth c) − TV(estimate of c, truth c). Differential isoform usage (DIU) restricts to genes where a class's truth differs from the mean of the region's other classes by gene TV ≥ 0.2 (≥ 100 UMIs in each) and correlates Δψ = ψ(class) − mean ψ(other classes) between estimate and truth. On these genes the joint consensus captures cell-type isoform differences (median r 0.67; LR_bulk has none by construction). The joint base units fail exactly where composition absorbed the bulk (cortex OPC r = −0.03, hippocampus astrocyte r = −0.45); the consensus profile avoids this.
 
+### 2026-11-25 SR weight chosen on one single-cell truth replicate, scored on the other
+
+`evaluate.py` now also scores DIU against each Joglekar replicate mouse (M1, M2; evaluation_diu_replicates.tsv). Joint consensus, median Δψ r over region × class (hippocampus-held-out runs: hippocampus units only):
+
+| setup | SR weight 0.01 | 0.03 | 0.1 | 0.3 | 1 |
+|---|---|---|---|---|---|
+| all bulk, M1 | 0.753 | 0.755 | 0.746 | 0.756 | 0.783 |
+| all bulk, M2 | 0.651 | 0.661 | 0.663 | 0.657 | 0.666 |
+| hippocampus held out, M1 | 0.685 | 0.689 | 0.695 | 0.696 | 0.699 |
+| hippocampus held out, M2 | 0.875 | 0.891 | 0.899 | 0.906 | 0.898 |
+
+Choosing on M1 picks weight 1 in both setups; on M2 it is best (all bulk) or within 0.008 of the best (hippocampus held out). Differences among weights 0.03–1 are small (≤ 0.015 on M2) next to the replicate difference; 0.01 is consistently worst. A held-out single-cell long-read replicate is a usable weight criterion (held-out bulk long reads were not); it favours full weight, but weights 0.1–1 are equivalent within noise, so the default stays 0.3.
+
 ### 2026-11-24 Tabula Sapiens: held-out heart donors, tissue vs per-library composition
 
 `fit.py holdout_donor=<donor>`: all heart PacBio libraries of one donor left out of LR_bulk and the joint fit (SR weight 0.3), then scored under the joint heart mixture and under the heart bulk profile of the other donors. `composition_by=library`: each bulk library's composition by gene-level deconvolution of its own single-gene-EC long-read counts against the Smart-seq2 class profiles (held-out libraries included, so their gene-level counts enter their weights). Per-library compositions follow chamber anatomy: atria fibroblast 0.19–0.23, endothelial 0.11–0.15; ventricles and septum fibroblast 0.04–0.17, endothelial 0.13–0.27; cardiomyocytes 0.45–0.60.
