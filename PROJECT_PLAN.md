@@ -2,7 +2,7 @@
 
 Joint short-read (SR) + long-read (LR) isoform quantification across many samples: LR gives identifiability, SR gives coverage. Pure transcript-level quantification. Details and results are in [LABNOTEBOOK.md](LABNOTEBOOK.md).
 
-Status as of 2026-11-18.
+Status as of 2026-11-24.
 
 ## 1. Bulk method development (WTC11, SG-NEx, simulations)
 
@@ -41,16 +41,19 @@ Open
 ## 3. Atlas (Tabula Sapiens/Muris SS2, Allen SMART-seq, ENCODE4 bulk LR)
 
 Done
-- Data survey (LABNOTEBOOK.md).
-- Mouse-brain pilot: Tabula Muris Senis Smart-seq2 (46 region × class × age groups) + ENCODE bulk PacBio (cortex, hippocampus) as mixtures over region × class units with composition estimated, design_gene prior; scored against Joglekar 2024 P56 ScISOr-Seq2. On genes with cell-type-specific isoform usage in the truth, the joint consensus tracks Δψ (median r 0.67).
-- Mouse brain with PBMC-style shrinkage + SR tempering: absolute TV improves (0.160 → 0.125) but DIU against Joglekar drops (Δψ r 0.63 → 0.49); SR carries the cell-type isoform signal. Held-out bulk LR (thinned molecules, or a whole region left out) does not select the weight the truth prefers; the truth points to SR weight ~0.1–0.3 under the default prior.
-- PBMC atlas check (Smart-seq2 of other donors + label-free bulk Kinnex, deconvolved composition, predicting held-out cell-type Kinnex): no variant beats a pooled bulk LR profile (best −0.06 vs −0.02 nats per molecule overall, −0.004 vs −0.001 within gene; labelled ceiling +0.075 / +0.0006). Needs strong class shrinkage (class/lineage sd ≤ 0.1) and a tempered SR likelihood (w 0.02–0.1); these Kinnex data have little cell-type isoform signal.
-- Composition: estimated in the EM it was not identified (cortex 71% OPC; those units became bulk-like). Now fixed by gene-level deconvolution (Allen MOp neurons added to the cortex reference; cortex 73% neuron, hippocampus 61%) as read shares (`JointEM(mixture="reads")`), which keeps design_gene MM monotone; converged in 2.5 h; no joint unit fails against the truth any more.
+- Pipeline (`analyses/mouse_brain/fit.py`, reused for Tabula Sapiens): SS2 pseudobulks (region × class × age) + ENCODE bulk PacBio as read-share mixtures over region × class units; design_gene prior (intercept + region + lineage + class); SR weight 0.3 by default; never an SR-only isoform fit.
+- Composition by gene-level deconvolution (`joli/deconv.py`: SS2 gene profiles from single-gene ECs, Allen MOp neurons added for cortex), fixed as read shares; estimated inside the EM it was not identified. Mouse brain: cortex 92% neuron, hippocampus 68%.
+- Convergence: monotone MM with fixed composition (read-share mixtures, SQUAREM safeguard); design_gene M-step 5× faster.
+- Mouse brain vs Joglekar 2024 single-cell LR truth: on genes with cell-type-specific isoform usage the joint consensus tracks Δψ (median r 0.67, sign agreement 0.81); absolute gene TV 0.15 vs 0.04 replicate noise (platform differences dominate).
+- SR weight: strong shrinkage + low SR weight improves absolute TV but loses the truth's cell-type differences; SR carries that signal. Held-out bulk LR (thinned molecules, a whole region, or donors) does not select the weight the truth prefers (0.1–0.3).
+- PBMC check (Ding Smart-seq2 + label-free bulk Kinnex predicting held-out cell-type Kinnex): no variant beats a pooled bulk LR profile; the labelled ceiling is only +0.0006 nats per molecule within gene.
+- Tabula Sapiens muscle + heart: SS2 from the controlled on-cluster BAMs, 19 ENCODE PacBio libraries; fitted (muscle 77% fibres, heart 49% cardiomyocytes). Held-out heart donors: per-library composition gains overall (+0.011, partly leakage) but nothing within gene.
 
 Open
-- Platform/protocol differences dominate absolute isoform-fraction error (every estimate 0.10–0.18 median gene TV from the truth vs 0.04 replicate noise).
-- Tabula Sapiens held-out heart donors: per-library composition (chamber mixtures) beats the pooled heart profile overall (+0.011 nats per molecule, partly from the held-out libraries' gene counts) but not within gene (−0.001); no isoform gain from cell-type resolution in bulk heart LR.
-- Tabula Sapiens pilot (muscle TSP4, heart TSP12 Smart-seq2; ENCODE4 psoas and heart PacBio, 19 libraries aligned): groups built, SR reads blocked (S3 objects need credentials; lab access via Karin). Allen human cortex (data use agreement unconfirmed).
+- Bulk LR (PBMC Kinnex, heart) shows little cell-type isoform signal beyond the pooled tissue profile; only the mouse-brain truth confirms the joint model's cell-type isoform differences. Need more tissues with single-cell LR truth (human brain, other ScISOr-Seq/SnISOr-Seq sets).
+- A data-driven criterion for the SR weight that sees cell types (held-out single-cell LR where available, or a combined SR + LR held-out likelihood).
+- Leave-one-region-out for cortex; striatum and cerebellum predictions (no bulk LR).
+- Allen human cortex (data use agreement unconfirmed); more Tabula Sapiens tissues.
 
 ## Engineering
 
@@ -64,6 +67,6 @@ Open
 
 ## Next, in order
 
-1. Same-sample SR + LR single-cell data to test whether SR helps isoforms when gene totals can be shared; variational inference for uncertainty.
-2. Baselines on the bulk sets.
-3. Atlas: ENCODE4 bulk LR + Tabula Sapiens SS2 with composition estimation.
+1. More single-cell LR truth for the atlas (human brain, other tissues) and an SR-weight criterion that sees cell types.
+2. Same-sample SR + LR single-cell data to test whether SR helps isoforms when gene totals can be shared; variational inference for uncertainty.
+3. Baselines on the bulk sets (lr-kallisto, oarfish, IsoQuant, MPAQT, miniQuant).
