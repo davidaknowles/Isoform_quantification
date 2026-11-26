@@ -3,7 +3,8 @@
 # geometry, barcode read = synthetic bc1+bc2+bc3 (24 nt) + UMI (prepare.py), cDNA = the public reads (sense), to the
 # GENCODE v49 spliceu targets; alevin-fry knee permit list, collate, quant (as analyses/igvf_cortex/sr_align.sh).
 #
-# Run: sbatch analyses/scotch_pbmc/sr_align.sh <sample_dir> <ref_dir> <cdna fastq.gz>...
+# Run: sbatch analyses/scotch_pbmc/sr_align.sh <sample_dir> <ref_dir> <cdna fastq.gz>
+#   (one cDNA file in the order of the synthetic barcode reads: concatenate the inputs given to prepare.py)
 #SBATCH -J scotch_sr
 #SBATCH -c 16
 #SBATCH --mem=96G
