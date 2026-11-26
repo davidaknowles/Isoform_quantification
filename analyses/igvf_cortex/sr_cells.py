@@ -10,7 +10,11 @@ to gene symbols) go to <igvf_dir>/molecules_sr for CellTypist.
 Writes <igvf_dir>/sr_barcodes.tsv (SR barcode, cell, primer, mouse, umis), <igvf_dir>/cells.tsv (barcode = cell, cell,
 mouse, sr_umis; the long-read cell table read by kinnex_parse/molecules.py) and molecules_sr/{counts.mtx,cells.txt,genes.txt}.
 
-Run: python analyses/igvf_cortex/sr_cells.py <igvf_dir> <ref_dir>
+Options (key=value after the positional arguments, for other Parse WT v2 data sets, e.g. analyses/scotch_pbmc):
+bmap=<round-1 table> v1=<round-2/3 onlist> order=321|123 (barcode as bc3+bc2+bc1, salmon --splitseqV2, or bc1+bc2+bc3)
+keep=<regex on the sample description, default B6J> min_umis=<int, default MIN_UMIS>.
+
+Run: python analyses/igvf_cortex/sr_cells.py <igvf_dir> <ref_dir> [key=value ...]
      ~/venv/celltypist/bin/python analyses/kinnex_parse/celltypist_labels.py <igvf_dir>/molecules_sr \
          <igvf_dir>/celltypist.tsv 0 Mouse_Isocortex_Hippocampus.pkl
 """
@@ -48,18 +52,19 @@ def gene_names(ref_dir):
     return tx_name
 
 
-def main(igvf_dir, ref_dir):
+def main(igvf_dir, ref_dir, bmap=None, v1=None, order="321", keep=STRAIN, min_umis=MIN_UMIS):
     d = Path(igvf_dir)
+    min_umis = int(min_umis)
     q = d / "sr_quant" / "quant" / "alevin"
     X = sp.csr_matrix(scipy.io.mmread(q / "quants_mat.mtx"))
     bcs = (q / "quants_mat_rows.txt").read_text().split()
     txs = (q / "quants_mat_cols.txt").read_text().split()
-    v1 = [w.strip() for w in gzip.open(d / "meta" / "IGVFFI1138MCVX.txt.gz", "rt") if w.strip()]
+    v1 = [w.strip() for w in gzip.open(v1 or d / "meta" / "IGVFFI1138MCVX.txt.gz", "rt") if w.strip()]
     idx = {w: i for i, w in enumerate(v1)}
-    bmap = pd.read_csv(d / "meta" / "IGVFFI9171FPFR.tsv.gz", sep="\t").set_index("barcode")
+    bmap = pd.read_csv(bmap or d / "meta" / "IGVFFI9171FPFR.tsv.gz", sep="\t").set_index("barcode")
     rows = []
     for j, b in enumerate(bcs):
-        b3, b2, b1 = b[:8], b[8:16], b[16:24]
+        b3, b2, b1 = (b[:8], b[8:16], b[16:24]) if order == "321" else (b[16:24], b[8:16], b[:8])
         if b1 not in bmap.index or b2 not in idx or b3 not in idx:
             continue
         m = bmap.loc[b1]
@@ -70,9 +75,10 @@ def main(igvf_dir, ref_dir):
     bc["umis"] = np.asarray(X[bc["row"].to_numpy()].sum(axis=1)).ravel()
     print(f"{len(bcs)} called barcodes, {len(bc)} on the whitelists", flush=True)
     per_cell = bc.groupby("cell").agg(mouse=("mouse", "first"), sr_umis=("umis", "sum")).reset_index()
-    keep = per_cell[(per_cell["sr_umis"] >= MIN_UMIS) & per_cell["mouse"].str.contains(STRAIN)]
+    kept = per_cell[(per_cell["sr_umis"] >= min_umis) & per_cell["mouse"].str.contains(keep)]
     print(per_cell.groupby(per_cell["mouse"]).agg(cells=("cell", "size"),
-                                                  kept=("sr_umis", lambda u: int((u >= MIN_UMIS).sum()))).to_string(), flush=True)
+                                                  kept=("sr_umis", lambda u: int((u >= min_umis).sum()))).to_string(), flush=True)
+    keep = kept
     bc = bc[bc["cell"].isin(keep["cell"])]
     bc.drop(columns="row").to_csv(d / "sr_barcodes.tsv", sep="\t", index=False)
     keep.assign(barcode=keep["cell"])[["barcode", "cell", "mouse", "sr_umis"]].to_csv(d / "cells.tsv", sep="\t", index=False)
@@ -93,8 +99,8 @@ def main(igvf_dir, ref_dir):
     scipy.io.mmwrite(out / "counts.mtx", M[:, ok])
     (out / "cells.txt").write_text("\n".join(cells) + "\n")
     (out / "genes.txt").write_text("\n".join(np.asarray(genes)[ok]) + "\n")
-    print(f"{len(cells)} {STRAIN} cells with >= {MIN_UMIS} UMIs; median UMIs {int(keep['sr_umis'].median())}", flush=True)
+    print(f"{len(cells)} cells with >= {min_umis} UMIs; median UMIs {int(keep['sr_umis'].median())}", flush=True)
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:3])
+    main(*sys.argv[1:3], **dict(a.split("=", 1) for a in sys.argv[3:]))

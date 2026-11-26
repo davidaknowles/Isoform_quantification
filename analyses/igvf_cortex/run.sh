@@ -19,8 +19,10 @@
 #SBATCH -t 2-00:00:00
 #SBATCH -o /gpfs/commons/groups/knowles_lab/daknowles/JOLI/igvf_13H/logs/%x.%A_%a.log
 set -euo pipefail
-D=/gpfs/commons/groups/knowles_lab/daknowles/JOLI/igvf_13H
-REF=/gpfs/commons/groups/knowles_lab/daknowles/JOLI/ref/gencodeM37
+# D, REF (and for other data sets SR_CELLS_ARGS, CELLTYPIST_MODEL, ONT_ARGS) can be set in the environment
+D=${D:-/gpfs/commons/groups/knowles_lab/daknowles/JOLI/igvf_13H}
+REF=${REF:-/gpfs/commons/groups/knowles_lab/daknowles/JOLI/ref/gencodeM37}
+CELLTYPIST_MODEL=${CELLTYPIST_MODEL:-Mouse_Isocortex_Hippocampus.pkl}
 REPO=/gpfs/commons/home/daknowles/projects/JOLI/Isoform_quantification
 MM=/nfs/sw/easybuild/software/minimap2/2.29/minimap2
 T=${SLURM_CPUS_PER_TASK:-16}
@@ -31,16 +33,17 @@ case $1 in
   index)
     $MM -x map-ont -d $REF/spliceu.ont.mmi $REF/spliceu.fa ;;
   extract)
-    fq=$(awk -F'\t' '$8=="ont" && $4=="fastq" {print $2}' $D/files.tsv | sed -n "$((k + 1))p")
-    ~/venv/kinnex/bin/python $REPO/analyses/igvf_cortex/ont_barcodes.py $D $D $D/ont/$fq.fastq.gz --chunk $k ;;
+    if [ -s $D/ont_files.txt ]; then fq=$(sed -n "$((k + 1))p" $D/ont_files.txt)
+    else fq=$D/ont/$(awk -F'\t' '$8=="ont" && $4=="fastq" {print $2}' $D/files.tsv | sed -n "$((k + 1))p").fastq.gz; fi
+    ~/venv/kinnex/bin/python $REPO/analyses/igvf_cortex/ont_barcodes.py $D $D $fq --chunk $k ${ONT_ARGS:-} ;;
   align)
     $MM -c -x map-ont -N 100 -t $T $REF/spliceu.ont.mmi $D/reads/cdna_$kk.fa.gz 2> $D/minimap2/cdna_$kk.log \
       | gzip -1 > $D/minimap2/cdna_$kk.paf.gz ;;
   sr_cells)
     [ -s $D/sr_quant/rad_dump/refs.txt ] || $REPO/rust/radpos/target/release/radpos $D/sr_quant/permit/map.collated.rad $D/sr_quant/rad_dump
-    ~/venv/joli/bin/python $REPO/analyses/igvf_cortex/sr_cells.py $D $REF
+    ~/venv/joli/bin/python $REPO/analyses/igvf_cortex/sr_cells.py $D $REF ${SR_CELLS_ARGS:-}
     module load python/3.12.3-GCCcore-13.3.0
-    ~/venv/celltypist/bin/python $REPO/analyses/kinnex_parse/celltypist_labels.py $D/molecules_sr $D/celltypist.tsv 0 Mouse_Isocortex_Hippocampus.pkl ;;
+    ~/venv/celltypist/bin/python $REPO/analyses/kinnex_parse/celltypist_labels.py $D/molecules_sr $D/celltypist.tsv 0 $CELLTYPIST_MODEL ;;
   molecules)
     ~/venv/joli/bin/python $REPO/analyses/kinnex_parse/molecules.py $D $REF chunk $kk ;;
   combine)

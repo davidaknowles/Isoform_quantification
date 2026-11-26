@@ -77,11 +77,14 @@ def main():
     ap.add_argument("--max-linker-edits", type=int, default=5)
     ap.add_argument("--max-edits", type=int, default=1)
     ap.add_argument("--rc-whitelists", action="store_true", help="reverse-complement the onlists (orientation check)")
+    ap.add_argument("--bmap", type=Path, help="round-1 table (barcode, sample description, parse barcode type, well); "
+                    "default <igvf_dir>/meta/IGVFFI9171FPFR.tsv.gz")
+    ap.add_argument("--v1", type=Path, help="round-2/3 onlist; default <igvf_dir>/meta/IGVFFI1138MCVX.txt.gz")
     a = ap.parse_args()
     a.out_dir.mkdir(parents=True, exist_ok=True)
     meta = a.igvf_dir / "meta"
-    v1 = [w.strip() for w in gzip.open(meta / "IGVFFI1138MCVX.txt.gz", "rt") if w.strip()]
-    bmap = pd.read_csv(meta / "IGVFFI9171FPFR.tsv.gz", sep="\t")
+    v1 = [w.strip() for w in gzip.open(a.v1 or meta / "IGVFFI1138MCVX.txt.gz", "rt") if w.strip()]
+    bmap = pd.read_csv(a.bmap or meta / "IGVFFI9171FPFR.tsv.gz", sep="\t")
     bc1 = bmap["barcode"].tolist()
     if a.rc_whitelists:
         v1 = [pl.reverse_complement(w) for w in v1]
