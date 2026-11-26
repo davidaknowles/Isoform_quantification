@@ -321,6 +321,22 @@ Scoring (within-gene isoform fractions, genes with ≥ 20 truth UMIs on ≥ 2 tr
 
 At a typical gene the truth's cell-type differences are as small as replicate noise (0.040 vs 0.037), while every estimate is 0.10–0.18 away: the gene-TV score measures platform and protocol agreement (bulk PacBio vs 10x ScISOr-Seq2 vs Smart-seq2), which the cell-type-agnostic LR_bulk wins. Specificity is the mean, over other classes c', of TV(estimate of c', truth c) − TV(estimate of c, truth c). Differential isoform usage (DIU) restricts to genes where a class's truth differs from the mean of the region's other classes by gene TV ≥ 0.2 (≥ 100 UMIs in each) and correlates Δψ = ψ(class) − mean ψ(other classes) between estimate and truth. On these genes the joint consensus captures cell-type isoform differences (median r 0.67; LR_bulk has none by construction). The joint base units fail exactly where composition absorbed the bulk (cortex OPC r = −0.03, hippocampus astrocyte r = −0.45); the consensus profile avoids this.
 
+### 2026-11-26 Same-cell replication: SCOTCH human PBMC (Parse WT Mini v2 + ONT)
+
+SCOTCH (Xu et al., Nat Commun 2026; SRA PRJNA1105904): Parse WT Mini v2 Illumina and ONT reads of the same sublibraries. Only Sample8 is usable: Sample7's Illumina reads carry no barcodes (no barcode read, none in the names). The public reads were demultiplexed by split-pipe (names carry wells, primer, barcodes and UMI); the ONT barcode end is trimmed, so ONT cells come from the names and reads are oriented by the TSO (`analyses/scotch_pbmc/ont_from_headers.py`; 78% of reads usable). Illumina: synthetic barcode reads (bc1 + bc2 + bc3 + UMI) from the names and salmon/alevin-fry with a custom geometry (`prepare.py`, `sr_align.sh`); 9,557 cells; CellTypist Immune_All_Low: 5 types with ≥ 100 cells (classical monocytes 3,180, naive B 1,008, Tcm/naive helper T 308, CD16+ NK 153, memory B 144). ONT: 5.28M molecules in cells, median 726 gene-unique molecules per cell. One ONT download failed its checksum and was replaced. Same held-out design and rescoring as IGVF.
+
+Gain per held-out molecule over LR_design (common molecules 97–99%):
+
+| fit | 5% all / within gene | 25% | 90% |
+|---|---|---|---|
+| joint_dgene | +0.110 / +0.102 | +0.036 / +0.026 | +0.020 / +0.008 |
+| joint (shared profile) | +0.151 / +0.104 | +0.031 / +0.006 | +0.007 / −0.010 |
+| joint_gene | −0.83 / −0.22 | −0.25 / −0.08 | −0.06 / −0.02 |
+
+Over LR alone on molecules it can score (91–99%): joint_dgene +0.012 / +0.003 (5%), +0.015 / +0.003 (25%), +0.018 / +0.007 (90%) against LR_design −0.001 / +0.005, +0.005 / +0.008, +0.005 / +0.006; the shared fit loses (−0.026 to −0.002 overall, −0.031 to −0.013 within gene).
+
+The design-prior joint fit (SR units = LR units rescaled per gene) beats the design-prior LR control at every LR depth in both same-cell data sets, overall and within gene, most when long reads are sparse; the shared-profile fit gains overall at low depth but is not consistent within gene. Default for same-cell data: joint_dgene.
+
 ### 2026-11-25 Published baselines on the SG-NEx spike-ins
 
 `analyses/baselines/` (installs, alignment, per-tool runs, collect, summarize; results in `analyses/results/sgnex_baselines_summary.tsv`). Long-read tools on each ONT protocol per replicate (minimap2 map-ont BAMs where needed): oarfish 0.13.0 (default coverage model, and the new `--model-truncation`), lr-kallisto (kallisto 0.52 long mode, k = 63), NanoCount 1.1 (negative-strand alignments kept, needed for cDNA), IsoQuant 4.1 (annotation-only quantification on the genome); hybrid miniQuant 1.4.1 (Illumina + one ONT protocol). MPAQT 2.4.0 failed (its P-matrix read simulation yields almost no pseudoaligned reads; not pursued). Mean over 3 replicates of the median gene TV of within-gene fractions:
