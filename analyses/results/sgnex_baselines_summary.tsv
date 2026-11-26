@@ -1,0 +1,64 @@
+mix	fit	gene_tv_median	sd_log_ratio	log_pearson	n_rep
+sequinA_v2	JOLI SRfrag+allLR+anch	0.0640	1.3790	0.9252	3
+sequinA_v2	oarfish:directcDNA	0.0668	1.1698	0.9475	3
+sequinA_v2	JOLI SRfrag+cDNA+anch	0.0673	1.4526	0.9184	3
+sequinA_v2	miniQuant:SR+cDNA	0.0680	1.4887	0.9157	3
+sequinA_v2	oarfish+trunc:directcDNA	0.0703	1.1480	0.9486	3
+sequinA_v2	JOLI directcDNA+anch	0.0728	1.1492	0.9483	3
+sequinA_v2	IsoQuant:directcDNA	0.0733	1.2094	0.9419	3
+sequinA_v2	JOLI SRfrag+directcDNA+anch	0.0777	1.5002	0.9155	3
+sequinA_v2	lr-kallisto:directcDNA	0.0795	1.2579	0.9408	3
+sequinA_v2	miniQuant:SR+directcDNA	0.0843	1.5272	0.9132	3
+sequinA_v2	NanoCount:directcDNA	0.0849	1.3190	0.9368	3
+sequinA_v2	miniQuant:directcDNA	0.0936	1.2131	0.9444	3
+sequinA_v2	oarfish:cDNA	0.1013	1.2450	0.9393	3
+sequinA_v2	lr-kallisto:cDNA	0.1053	1.2783	0.9373	3
+sequinA_v2	oarfish+trunc:cDNA	0.1183	1.2388	0.9389	3
+sequinA_v2	IsoQuant:cDNA	0.1188	1.3266	0.9311	3
+sequinA_v2	JOLI cDNA+anch	0.1218	1.2416	0.9385	3
+sequinA_v2	salmon:SR bias	0.1219	1.6920	0.8943	3
+sequinA_v2	miniQuant:cDNA	0.1225	1.2674	0.9370	3
+sequinA_v2	NanoCount:cDNA	0.1237	1.2966	0.9350	3
+sequinA_v2	salmon:SR nobias	0.1333	1.6581	0.8998	3
+sirv4	oarfish+trunc:directcDNA	0.1408	1.3907		3
+sirv4	JOLI SRfrag+allLR+anch	0.1432	1.6045		3
+sirv4	JOLI SRfrag+cDNA+anch	0.1481	1.6474		3
+sirv4	miniQuant:SR+cDNA	0.1643	2.0448		3
+sirv4	JOLI SRfrag+directcDNA+anch	0.1676	1.8097		3
+sirv4	JOLI directcDNA+anch	0.1718	1.4306		3
+sirv4	miniQuant:SR+directcDNA	0.1958	2.0580		3
+sirv4	miniQuant:directcDNA	0.2156	1.6939		3
+sirv4	IsoQuant:directcDNA	0.2362	1.4990		3
+sirv4	oarfish:directcDNA	0.2374	2.2152		3
+sirv4	NanoCount:directcDNA	0.2406	1.5923		3
+sirv4	salmon:SR bias	0.2528	1.8303		3
+sirv4	oarfish+trunc:cDNA	0.2591	1.6077		3
+sirv4	salmon:SR nobias	0.2602	1.8002		3
+sirv4	JOLI cDNA+anch	0.2626	1.6206		3
+sirv4	lr-kallisto:directcDNA	0.2652	2.1390		3
+sirv4	miniQuant:cDNA	0.2694	1.9354		3
+sirv4	oarfish:cDNA	0.2879	2.1528		3
+sirv4	lr-kallisto:cDNA	0.3422	2.2312		3
+sirv4	IsoQuant:cDNA	0.3731	1.7319		3
+sirv4	NanoCount:cDNA	0.4122	1.8622		3
+sirv_E2	oarfish+trunc:directcDNA	0.1177	0.9568	0.8605	3
+sirv_E2	JOLI SRfrag+allLR+anch	0.1314	1.1449	0.8250	3
+sirv_E2	oarfish:directcDNA	0.1373	2.0409	0.6010	3
+sirv_E2	JOLI SRfrag+cDNA+anch	0.1453	1.1639	0.8213	3
+sirv_E2	JOLI SRfrag+directcDNA+anch	0.1574	1.3856	0.7724	3
+sirv_E2	JOLI directcDNA+anch	0.1833	0.9840	0.8424	3
+sirv_E2	miniQuant:SR+cDNA	0.1907	1.6587	0.6406	3
+sirv_E2	miniQuant:SR+directcDNA	0.2039	1.7062	0.6445	3
+sirv_E2	miniQuant:directcDNA	0.2188	1.5712	0.6414	3
+sirv_E2	lr-kallisto:directcDNA	0.2313	2.0608	0.5788	3
+sirv_E2	IsoQuant:directcDNA	0.2319	1.0365	0.8367	3
+sirv_E2	lr-kallisto:cDNA	0.2357	2.2020	0.5766	3
+sirv_E2	NanoCount:directcDNA	0.2357	1.3057	0.7513	3
+sirv_E2	salmon:SR nobias	0.2464	1.0549	0.8318	3
+sirv_E2	miniQuant:cDNA	0.2475	1.9663	0.5424	3
+sirv_E2	oarfish+trunc:cDNA	0.2487	1.3269	0.7803	3
+sirv_E2	JOLI cDNA+anch	0.2493	1.2554	0.7793	3
+sirv_E2	oarfish:cDNA	0.2597	1.9613	0.6720	3
+sirv_E2	salmon:SR bias	0.2934	1.0859	0.8253	3
+sirv_E2	IsoQuant:cDNA	0.3513	1.4035	0.7629	3
+sirv_E2	NanoCount:cDNA	0.4055	1.5814	0.6900	3

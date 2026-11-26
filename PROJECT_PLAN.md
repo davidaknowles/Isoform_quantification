@@ -14,7 +14,7 @@ Done
 
 Open
 - Mixed results on SIRV-4 when SR is added. SR fragment G/C model implemented (optional): strong, reproducible G/C curve but little change in isoform fractions; salmon's full bias correction does no better. SR isoform error is fragment ambiguity, not bias.
-- Baselines: lr-kallisto, oarfish, IsoQuant, MPAQT, miniQuant.
+- Baselines on SG-NEx spike-ins done (oarfish, lr-kallisto, NanoCount, IsoQuant, miniQuant; MPAQT failed): joint JOLI best on sequins, second to oarfish's truncation model on SIRVs; JOLI's LR read-end model loses to oarfish's truncation model. Next: improve the read-end model (compare with oarfish's), baselines on WTC11 SIRV-4.
 - Empirical Bayes prior across samples (variational inference in place of plug-in Dirichlet).
 
 ## 2. Single cell: Parse SR + 10x Kinnex LR (PBMC, different donors)
@@ -69,4 +69,4 @@ Open
 
 1. More single-cell LR truth for the atlas (human brain, other tissues); held-out single-cell LR as the SR-weight criterion (works on mouse brain).
 2. Same-cell SR + LR: replicate the IGVF cortex gain (SCOTCH PBMC, CAST nuclei); variational inference for uncertainty.
-3. Baselines on the bulk sets (lr-kallisto, oarfish, IsoQuant, MPAQT, miniQuant).
+3. Improve the LR read-end model against oarfish's truncation model; baselines on WTC11.

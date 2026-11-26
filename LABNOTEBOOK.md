@@ -321,6 +321,25 @@ Scoring (within-gene isoform fractions, genes with ≥ 20 truth UMIs on ≥ 2 tr
 
 At a typical gene the truth's cell-type differences are as small as replicate noise (0.040 vs 0.037), while every estimate is 0.10–0.18 away: the gene-TV score measures platform and protocol agreement (bulk PacBio vs 10x ScISOr-Seq2 vs Smart-seq2), which the cell-type-agnostic LR_bulk wins. Specificity is the mean, over other classes c', of TV(estimate of c', truth c) − TV(estimate of c, truth c). Differential isoform usage (DIU) restricts to genes where a class's truth differs from the mean of the region's other classes by gene TV ≥ 0.2 (≥ 100 UMIs in each) and correlates Δψ = ψ(class) − mean ψ(other classes) between estimate and truth. On these genes the joint consensus captures cell-type isoform differences (median r 0.67; LR_bulk has none by construction). The joint base units fail exactly where composition absorbed the bulk (cortex OPC r = −0.03, hippocampus astrocyte r = −0.45); the consensus profile avoids this.
 
+### 2026-11-25 Published baselines on the SG-NEx spike-ins
+
+`analyses/baselines/` (installs, alignment, per-tool runs, collect, summarize; results in `analyses/results/sgnex_baselines_summary.tsv`). Long-read tools on each ONT protocol per replicate (minimap2 map-ont BAMs where needed): oarfish 0.13.0 (default coverage model, and the new `--model-truncation`), lr-kallisto (kallisto 0.52 long mode, k = 63), NanoCount 1.1 (negative-strand alignments kept, needed for cDNA), IsoQuant 4.1 (annotation-only quantification on the genome); hybrid miniQuant 1.4.1 (Illumina + one ONT protocol). MPAQT 2.4.0 failed (its P-matrix read simulation yields almost no pseudoaligned reads; not pursued). Mean over 3 replicates of the median gene TV of within-gene fractions:
+
+| fit | sequins | SIRV-4 | SIRV E2 |
+|---|---|---|---|
+| JOLI SR + both ONT, read-end model | **0.064** | 0.143 | 0.131 |
+| JOLI direct cDNA, read-end model | 0.073 | 0.172 | 0.183 |
+| oarfish direct cDNA | 0.067 | 0.237 | 0.137 |
+| oarfish direct cDNA, truncation model | 0.070 | **0.141** | **0.118** |
+| IsoQuant direct cDNA | 0.073 | 0.236 | 0.232 |
+| lr-kallisto direct cDNA | 0.080 | 0.265 | 0.231 |
+| NanoCount direct cDNA | 0.085 | 0.241 | 0.236 |
+| miniQuant SR + PCR-cDNA | 0.068 | 0.164 | 0.191 |
+| miniQuant SR + direct cDNA | 0.084 | 0.196 | 0.204 |
+| salmon SR, bias correction | 0.122 | 0.253 | 0.293 |
+
+The joint JOLI fit is best on sequins and second to oarfish's truncation model on both SIRV mixes; it beats the hybrid miniQuant everywhere. Among long-read-only fits, oarfish's learned truncation model (3'/5'/full-length mixture) beats JOLI's anchored read-end model on SIRVs (0.141 vs 0.172, 0.118 vs 0.183) and ties on sequins: the LR read-end model is where JOLI loses ground. Each SG-NEx Illumina FASTQ starts with ~26M 8-bp index-like reads before ~78M real pairs (hence salmon's ~41% mapping rate); all SR fits use only the real pairs.
+
 ### 2026-11-25 Same-cell Parse SR + ONT LR (IGVF mouse cortex): short reads help held-out long reads
 
 Data: IGVF B01_13H left cortex subpool (Loving, Sullivan, Reese et al.; open access): Parse Evercode WT v2 Illumina and ONT R10 reads of the same nuclei, 8 mice (4 B6J, 4 CAST/EiJ) multiplexed by round-1 well. Short reads: salmon/alevin-fry `--splitseqV2` with knee cell calling to GENCODE vM37 spliced + unspliced targets (`analyses/igvf_cortex/sr_align.sh`); cells = round-1 well × round-2 × round-3 indices, so a well's oligo-dT and random-hexamer barcodes form one cell; B6J nuclei with ≥ 500 SR UMIs kept (5,687; the reference is GRCm39); CellTypist Mouse_Isocortex_Hippocampus labels (13 types with ≥ 100 cells, L4/5 IT 1,721 to L2/3 IT PPP 113). Long reads: Parse WT v2 barcodes called in ONT reads with tealeaf's long-read caller given the WT v2 linkers (22 and 30 nt; whitelists and linkers in Illumina read-2 orientation), 38–42% of reads called (most others carry no linker at either end); minimap2 map-ont; one read per molecule: 7.56M molecules in these cells, median 1,070 gene-unique molecules per cell (`ont_barcodes.py`, `run.sh`). Evaluation with the PBMC held-out pipeline (`heldout_lr.py`, `heldout_rescore.py`): 10% of each cell type's ONT molecules held out, training on 5%, 25% or 90% of the rest.
