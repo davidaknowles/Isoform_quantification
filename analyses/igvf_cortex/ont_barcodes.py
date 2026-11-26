@@ -48,7 +48,8 @@ def read_fastq(paths, limit=0):
                 if not head:
                     break
                 seq, _, qual = fh.readline().strip(), fh.readline(), fh.readline().strip()
-                yield head[1:].split()[0], seq, qual
+                fields = head[1:].split()
+                yield (fields[0] if fields else f"unnamed_{n}"), seq, qual
                 n += 1
                 if limit and n >= limit:
                     return
