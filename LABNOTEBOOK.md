@@ -321,6 +321,22 @@ Scoring (within-gene isoform fractions, genes with ≥ 20 truth UMIs on ≥ 2 tr
 
 At a typical gene the truth's cell-type differences are as small as replicate noise (0.040 vs 0.037), while every estimate is 0.10–0.18 away: the gene-TV score measures platform and protocol agreement (bulk PacBio vs 10x ScISOr-Seq2 vs Smart-seq2), which the cell-type-agnostic LR_bulk wins. Specificity is the mean, over other classes c', of TV(estimate of c', truth c) − TV(estimate of c, truth c). Differential isoform usage (DIU) restricts to genes where a class's truth differs from the mean of the region's other classes by gene TV ≥ 0.2 (≥ 100 UMIs in each) and correlates Δψ = ψ(class) − mean ψ(other classes) between estimate and truth. On these genes the joint consensus captures cell-type isoform differences (median r 0.67; LR_bulk has none by construction). The joint base units fail exactly where composition absorbed the bulk (cortex OPC r = −0.03, hippocampus astrocyte r = −0.45); the consensus profile avoids this.
 
+### 2026-11-27 Read-end model vs oarfish: alignment-score weights close the gap
+
+oarfish 0.13's truncation model (`--model-truncation`) has the same structure as the AnchoredTruncationModel (3'/5'-anchored components with a censored read-length law) plus full-length and uniform components and geometric-mixture end kernels; the larger difference is that it weights each alignment by exp((AS - best AS) / D) where JOLI kept only best-score ties. An earlier JOLI test of score weights averaged them over reads with the same transcript set (rich-EC weights) and lost the information; here the AS gap bin is an extra EC feature (`joli.paf.score_weights`), so reads in a class share their gaps. Ablation on the SG-NEx spike-ins (`analyses/sgnex/readend_variants.py`, 6 replicates, gene TV):
+
+| fit | sequins | SIRV-4 | SIRV E2 |
+|---|---|---|---|
+| direct cDNA, ties (previous) | 0.073 | 0.172 | 0.183 |
+| + uniform component | 0.072 | 0.169 | 0.184 |
+| + score weights AS ≥ 0.95 best, D = 10 / 5 / 3 / 2 | 0.072 / 0.071 / 0.070 / 0.070 | 0.143 / 0.135 / 0.142 / 0.153 | 0.128 / 0.121 / 0.118 / 0.116 |
+| + uniform + score weights, all secondaries (D = 10) | 0.071 | 0.145 | 0.129 |
+| oarfish direct cDNA, truncation model | 0.070 | 0.141 | 0.118 |
+| SR + both ONT, ties (previous joint) | 0.064 | 0.143 | 0.131 |
+| SR + both ONT, score weights D = 3 / 5 | 0.063 / 0.063 | 0.143 / 0.144 | 0.114 / 0.115 |
+
+Score weights are the missing ingredient: ONT direct cDNA alone now matches or beats oarfish's truncation model, and the joint fit improves on SIRV E2 (0.131 → 0.114, below oarfish's 0.118) and in abundance (SD of log ratio SIRV-4 1.60 → 1.56, SIRV E2 1.15 → 1.07); the uniform component and keeping all secondary alignments add nothing; PCR-cDNA barely changes (0.122 → 0.117 sequins). Default chosen: AS ≥ 0.95 × best, D = 5 (`SCORE_FRAC`, `SCORE_D`). On SIRV-4 direct cDNA alone (0.135) is better than the joint fit (0.143). The single-cell and atlas pipelines collapse molecules from best-score ties (kinnex_parse/molecules.py); carrying the AS gap into their molecule files is the next step to use the weights there.
+
 ### 2026-11-26 Same-cell replication: SCOTCH human PBMC (Parse WT Mini v2 + ONT)
 
 SCOTCH (Xu et al., Nat Commun 2026; SRA PRJNA1105904): Parse WT Mini v2 Illumina and ONT reads of the same sublibraries. Only Sample8 is usable: Sample7's Illumina reads carry no barcodes (no barcode read, none in the names). The public reads were demultiplexed by split-pipe (names carry wells, primer, barcodes and UMI); the ONT barcode end is trimmed, so ONT cells come from the names and reads are oriented by the TSO (`analyses/scotch_pbmc/ont_from_headers.py`; 78% of reads usable). Illumina: synthetic barcode reads (bc1 + bc2 + bc3 + UMI) from the names and salmon/alevin-fry with a custom geometry (`prepare.py`, `sr_align.sh`); 9,557 cells; CellTypist Immune_All_Low: 5 types with ≥ 100 cells (classical monocytes 3,180, naive B 1,008, Tcm/naive helper T 308, CD16+ NK 153, memory B 144). ONT: 5.28M molecules in cells, median 726 gene-unique molecules per cell. One ONT download failed its checksum and was replaced. Same held-out design and rescoring as IGVF.

@@ -24,10 +24,9 @@ import pandas as pd
 
 from joli.joint import JointEM, molar_to_tpm
 from joli.lr_bias import AnchoredTruncationModel, FragmentModel, fit_bias
-from joli.paf import filter_alignments, library_from_alignments, read_fasta_lengths, read_paf
+from joli.paf import filter_alignments, library_from_alignments, read_fasta_lengths, read_paf, score_weights
 from joli.salmon_io import library_from_fragments, read_fragments
 
-GAP_EDGES = np.array([0, 1, 3, 6, 10, 15, 20, 30, 50, 1e9])
 VARIANTS = {"anch": (1.0, None, ("3p", "5p")), "anch+int": (1.0, None, ("3p", "5p", "internal")),
             "anch+asD5": (0.95, 5.0, ("3p", "5p")), "anch+asD10": (0.95, 10.0, ("3p", "5p")),
             "anch+int+asD10": (0.95, 10.0, ("3p", "5p", "internal")),
@@ -44,9 +43,8 @@ def lr_library(raw_by_frac, raw, proto, names, tx_len, v):
     feat = model.features(aln["tstart"], aln["tend"], aln["tlen"])
     weight = None
     if D is not None:
-        gap = aln["AS_gap"].to_numpy(dtype=np.float64)
-        feat = np.column_stack([feat, np.searchsorted(GAP_EDGES, gap, side="right") - 1])
-        weight = np.exp(-gap / D)
+        gap_bin, weight = score_weights(aln, D)
+        feat = np.column_stack([feat, gap_bin])
     return library_from_alignments(proto, aln, names, features=feat, weight=weight), model, len(aln)
 
 

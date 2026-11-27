@@ -88,6 +88,24 @@ def filter_alignments(aln, score_frac=1.0, strand=None, min_read_frac=0.0):
     return a.reset_index(drop=True)
 
 
+SCORE_FRAC = 0.95                                     # keep alignments with AS >= SCORE_FRAC * best AS
+SCORE_D = 5.0                                         # weight exp(-(best AS - AS) / SCORE_D), oarfish's score probability
+GAP_EDGES = np.array([0, 1, 3, 6, 10, 15, 20, 30, 50, 1e9])
+
+
+def score_weights(aln, D=SCORE_D, edges=GAP_EDGES):
+    """
+    Alignment-score weights for near-best alignments (filter_alignments(aln, score_frac=SCORE_FRAC)):
+    (gap bin (n,) int, weight (n,)) with weight exp(-(best AS - AS) / D). Add the gap bin as a feature
+    column in library_from_alignments(features=..., weight=...) so reads in an equivalence class share
+    their score gaps and the class weight is not an average over reads with different gaps (score_weight).
+    On SG-NEx spike-ins (D = 5) this takes ONT direct cDNA gene TV from 0.173 / 0.183 to 0.135 / 0.121
+    on SIRV-4 / SIRV E2 (LABNOTEBOOK 2026-11-27).
+    """
+    gap = np.asarray(aln["AS_gap"], dtype=np.float64)
+    return np.searchsorted(edges, gap, side="right") - 1, np.exp(-gap / D)
+
+
 def score_weight(aln, beta=1.0):
     """
     Per-alignment weight exp(-beta * (best AS of the read - AS)), salmon's

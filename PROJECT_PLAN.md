@@ -14,7 +14,7 @@ Done
 
 Open
 - Mixed results on SIRV-4 when SR is added. SR fragment G/C model implemented (optional): strong, reproducible G/C curve but little change in isoform fractions; salmon's full bias correction does no better. SR isoform error is fragment ambiguity, not bias.
-- Baselines on SG-NEx spike-ins done (oarfish, lr-kallisto, NanoCount, IsoQuant, miniQuant; MPAQT failed): joint JOLI best on sequins, second to oarfish's truncation model on SIRVs; JOLI's LR read-end model loses to oarfish's truncation model. Next: improve the read-end model (compare with oarfish's), baselines on WTC11 SIRV-4.
+- Baselines on SG-NEx spike-ins done (oarfish, lr-kallisto, NanoCount, IsoQuant, miniQuant; MPAQT failed): joint JOLI best on sequins, second to oarfish's truncation model on SIRVs; JOLI's LR read-end model loses to oarfish's truncation model. Read-end gap closed: alignment-score weights (AS ≥ 0.95 best, exp(-gap/5), gap bin in the EC key) make ONT direct cDNA match or beat oarfish's truncation model, and the joint fit beats it on SIRV E2 (0.114 vs 0.118) and sequins (0.063 vs 0.070); SIRV-4 joint 0.143 vs 0.141. Next: carry the AS gap into the single-cell/atlas molecule files; baselines on WTC11 SIRV-4.
 - Empirical Bayes prior across samples (variational inference in place of plug-in Dirichlet).
 
 ## 2. Single cell: Parse SR + 10x Kinnex LR (PBMC, different donors)
@@ -69,4 +69,4 @@ Open
 
 1. More single-cell LR truth for the atlas (human brain, other tissues); held-out single-cell LR as the SR-weight criterion (works on mouse brain).
 2. Same-cell SR + LR: replicate the IGVF cortex gain (SCOTCH PBMC, CAST nuclei); variational inference for uncertainty.
-3. Improve the LR read-end model against oarfish's truncation model; baselines on WTC11.
+3. Score-weighted alignments in the single-cell and atlas pipelines (AS gap in molecule files); baselines on WTC11.
