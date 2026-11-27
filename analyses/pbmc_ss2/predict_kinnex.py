@@ -102,7 +102,7 @@ def gene_profile(theta, genes, first):
 def logprobs(lib, theta, model, genes):
     em = JointEM([lib], units=[0])
     fl = em.libs[0]
-    c, b = bias_weights(fl.tx, fl.feat, np.ones(len(fl.tx)), fl.b, trunc=model)
+    c, b = bias_weights(fl.tx, fl.feat, fl.c, fl.b, trunc=model)
     em.set_bias(0, c=c, b=b)
     return em.ec_logprob(theta[None]), em.ec_logprob(theta[None], groups=genes), fl.counts
 

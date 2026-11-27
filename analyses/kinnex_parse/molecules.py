@@ -2,12 +2,12 @@
 Per-molecule alignments and cell x gene counts for the Kinnex Parse long reads.
 
 Stages:
-  chunk <k>  cdna_<k> alignments (minimap2 PAF) filtered to best-score ties on
-             the sense strand, joined with the read's cell, UMI and primer
+  chunk <k>  cdna_<k> alignments (minimap2 PAF) on the sense strand with AS >= SCORE_FRAC x the
+             read's best (their score gaps kept for score weights, joli.paf.score_weights), joined with the read's cell, UMI and primer
              (called cells only); saved as molecules/chunk_<k>.npz.
   combine    one read per molecule (cell, UMI, primer), the one with the
              longest cDNA; saves molecules/alignments.npz (per alignment: mol,
-             cell, half, tx_idx, tstart, tend, tlen) and a cell x gene UMI
+             cell, half, tx_idx, tstart, tend, tlen, as_gap) and a cell x gene UMI
              matrix (counts.mtx, cells.txt, genes.txt; gene symbols) for
              CellTypist, counting molecules whose alignments share one gene.
 
@@ -30,7 +30,7 @@ import pandas as pd
 import scipy.io
 import scipy.sparse as sp
 
-from joli.paf import filter_alignments, read_fasta_lengths, read_paf
+from joli.paf import SCORE_FRAC, filter_alignments, read_fasta_lengths, read_paf
 from joli.rad import encode_2bit
 
 
@@ -44,7 +44,7 @@ def chunk(kdir, ref_dir, k):
                         usecols=["read", "cb", "umi", "primer", "cdna_len"])
     reads["cell"] = bc_cell.reindex(reads["cb"]).to_numpy()
     reads = reads.dropna(subset=["cell"]).set_index("read")
-    aln = filter_alignments(read_paf(kdir / "minimap2" / f"cdna_{k}.paf.gz"), strand="+")
+    aln = filter_alignments(read_paf(kdir / "minimap2" / f"cdna_{k}.paf.gz"), score_frac=SCORE_FRAC, strand="+")
     rid = aln["read"].astype(str).astype(np.int64).to_numpy()
     ok = np.isin(rid, reads.index.to_numpy())
     aln, rid = aln[ok], rid[ok]
@@ -56,7 +56,7 @@ def chunk(kdir, ref_dir, k):
              cdna_len=r["cdna_len"].to_numpy(np.int32),
              tx_idx=pos[aln["tx"].astype(str)].to_numpy(np.int32),
              tstart=aln["tstart"].to_numpy(np.int32), tend=aln["tend"].to_numpy(np.int32),
-             tlen=aln["tlen"].to_numpy(np.int32))
+             tlen=aln["tlen"].to_numpy(np.int32), as_gap=aln["AS_gap"].to_numpy(np.float32))
     print(f"chunk {k}: {len(np.unique(rid))} reads in cells, {len(rid)} alignments", flush=True)
 
 
@@ -71,8 +71,9 @@ def combine(kdir, ref_dir):
     keep = np.isin(a["read"], rd["read"].to_numpy())
     mol = mol_of[a["read"][keep]].to_numpy()
     out = {"mol": mol, "cell": a["cell"][keep], "half": a["half"][keep]}
-    for key in ["tx_idx", "tstart", "tend", "tlen"]:
-        out[key] = a[key][keep]
+    for key in ["tx_idx", "tstart", "tend", "tlen", "as_gap"]:
+        if key in a:
+            out[key] = a[key][keep]
     np.savez(kdir / "molecules" / "alignments.npz", **out)
 
     n_cells = int(out["cell"].max()) + 1

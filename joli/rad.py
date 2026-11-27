@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .paf import library_from_alignments
+from .paf import library_from_alignments, score_weights
 
 BASES = np.array(list("ACGT"))
 
@@ -114,7 +114,12 @@ def libraries_from_molecules(aln, cell_group, transcript_names, rates, model=Non
     for g in pd.unique(groups):
         a = aln[groups == g]
         feat = None if model is None else model.features(a["start"], a["end"], a["tlen"])
-        out[g] = library_from_alignments(str(g), a, transcript_names, features=feat,
+        weight = None
+        if "as_gap" in a and feat is not None:
+            # alignment-score weights with the gap bin in the EC key (joli.paf.score_weights)
+            gap_bin, weight = score_weights(a.rename(columns={"as_gap": "AS_gap"}))
+            feat = np.column_stack([feat, gap_bin])
+        out[g] = library_from_alignments(str(g), a, transcript_names, features=feat, weight=weight,
                                          platform=platform, b=rates[g])
     return out
 

@@ -68,7 +68,7 @@ def score(ctx, fit, out, test_libs, genes):
         kit = k.split("|")[2]
         fl = em.libs[l]
         lengths = out["lr_length"] or {}
-        c, b = bias_weights(fl.tx, fl.feat, np.ones(len(fl.tx)), fl.b, trunc=out["lr_models"][kit],
+        c, b = bias_weights(fl.tx, fl.feat, fl.c, fl.b, trunc=out["lr_models"][kit],
                             length=lengths.get(kit))
         em.set_bias(l, c=c, b=b)
     rows = {k: {"fit": fit, "library": k, "unit": k.split("|")[0], "kit": k.split("|")[2],

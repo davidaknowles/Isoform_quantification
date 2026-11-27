@@ -52,7 +52,7 @@ def fit_logprobs(fit, test_libs, keys, genes):
     for l, k in enumerate(keys):
         kit = k.split("|")[2]
         fl = em.libs[l]
-        c, b = bias_weights(fl.tx, fl.feat, np.ones(len(fl.tx)), fl.b, trunc=fit["lr_models"][kit],
+        c, b = bias_weights(fl.tx, fl.feat, fl.c, fl.b, trunc=fit["lr_models"][kit],
                             length=lengths.get(kit))
         em.set_bias(l, c=c, b=b)
     return em.ec_logprob(fit["theta"]), em.ec_logprob(fit["theta"], groups=genes), [fl.counts for fl in em.libs]

@@ -133,7 +133,7 @@ def heldout_logprobs(libs, pi, theta, tm, gene_groups, mixture):
     """Per-EC log-probabilities (all, within gene) and counts of held-out libraries at fixed abundances."""
     em = JointEM(libs, pi=pi, mixture=mixture)
     for l, fl in enumerate(em.libs):
-        c, b = bias_weights(fl.tx, fl.feat, np.ones(len(fl.tx)), fl.b, trunc=tm)
+        c, b = bias_weights(fl.tx, fl.feat, fl.c, fl.b, trunc=tm)
         em.set_bias(l, c=c, b=b)
     return em.ec_logprob(theta), em.ec_logprob(theta, groups=gene_groups), [fl.counts for fl in em.libs]
 

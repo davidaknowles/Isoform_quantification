@@ -165,7 +165,8 @@ def lr_libraries(sources, names, fraction, rates, model, seed=0, test_fraction=0
                 if sel.any():
                     dest.append(pd.DataFrame({"read": mol[sel].astype(np.int64) + off,
                                               "cell": cell[sel], "tx_idx": z["tx_idx"][sel], "start": z["tstart"][sel],
-                                              "end": z["tend"][sel], "tlen": z["tlen"][sel]}))
+                                              "end": z["tend"][sel], "tlen": z["tlen"][sel],
+                                              **({"as_gap": z["as_gap"][sel]} if "as_gap" in z else {})}))
             off += int(mol.max()) + 1
         a = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=["read", "cell"])
         del parts

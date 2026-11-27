@@ -23,7 +23,8 @@ import pandas as pd
 
 from joli.alevin import primer_rates
 from joli.lr_bias import AnchoredTruncationModel, FragmentModel
-from joli.paf import filter_alignments, library_from_alignments, read_fasta_lengths, read_paf
+from joli.paf import (SCORE_FRAC, filter_alignments, library_from_alignments, read_fasta_lengths, read_paf,
+                      score_weights)
 from joli.salmon_io import library_from_fragments, read_fragments
 
 KAPPA0 = np.exp(-8.6)       # poly(dT) internal priming per base on pre-mRNA (as for the Parse/Kinnex fits)
@@ -59,9 +60,11 @@ def main(d, ref, out, sr_fraction=1.0):
     for f in files.itertuples():
         paf = d / "lr" / "minimap2" / f"{f.accession}.paf.gz"
         t0 = time.time()
-        aln = filter_alignments(read_paf(paf))
-        feat = feat_model.features(aln["tstart"], aln["tend"], aln["tlen"])
-        lr[f.accession] = library_from_alignments(f"{f.tissue}|LR|{f.accession}", aln, names, features=feat, b=rates)
+        aln = filter_alignments(read_paf(paf), score_frac=SCORE_FRAC)
+        gap_bin, weight = score_weights(aln)          # alignment-score weights, gap bin in the EC key
+        feat = np.column_stack([feat_model.features(aln["tstart"], aln["tend"], aln["tlen"]), gap_bin])
+        lr[f.accession] = library_from_alignments(f"{f.tissue}|LR|{f.accession}", aln, names, features=feat,
+                                                  weight=weight, b=rates)
         print(f"LR {f.accession} ({f.tissue}): {aln['read'].nunique()} reads ({time.time() - t0:.0f} s)", flush=True)
     with open(out, "wb") as fh:
         pickle.dump({"names": names, "tx_len": tx_len, "unspliced": unspliced, "genes": genes,
